@@ -1,0 +1,14 @@
+"Games"
+{
+	"tf"
+	{
+		"Offsets"
+		{
+			"TakeHealth"
+			{
+				"windows"	"64"
+				"linux"		"65"
+			}
+		}
+	}
+}
