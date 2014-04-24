@@ -3,6 +3,12 @@
 #endif
 #define _bossfightfortress_included
 
+// Sublime text 2 auto completion
+#include <sourcemod>
+#include <sdktools>
+#include <tf2items>
+#include <tf2_stocks>
+
 // Name of our game mode
 #define BFF_GAME_MODE_NAME "BossFightFortress"
 
@@ -108,4 +114,76 @@ forward BFF_FormatTauntAbilityMessage(String:message[], maxlength, client, Abili
  */
 forward BFF_FormatChargeAbilityMessage(String:message[], maxlength, client, AbilityState:chargeAbilityState, Float:chargeOrCooldown);
 
+/**
+ *	Gives a weapon to a client
+ *
+ *	@param client		Client to give the weapon to
+ *	@param itemIndex	Item index of the weapon
+ *	@param classname	Classname of the weapon
+ *	@param attributes	Attribute string formatted like "1 ; 2", spaces are optional
+ *	@param quality		Item quality
+ *	@param level		Item level
+ *	@param autoSwitch	If true, switches to the weapon when it's given
+ *	@return 			Entity index of the weapon
+ */
+stock BFF_GiveItem(client, itemIndex, String:classname[], const String:attributes[], quality=14, level=42, bool:autoSwitch=true)
+{
+	new Handle:weapon = TF2Items_CreateItem(OVERRIDE_ALL|FORCE_GENERATION);
+	TF2Items_SetClassname(weapon, classname);
+	TF2Items_SetItemIndex(weapon, itemIndex);
+	TF2Items_SetQuality(weapon, quality);
+	TF2Items_SetLevel(weapon, level);
 
+	new String:attributesParts[32][16];
+	new attributeCount = ExplodeString(attributes, ";", attributesParts, sizeof(attributesParts), sizeof(attributesParts[]));
+	attributeCount -= (attributeCount % 2);
+	attributeCount /= 2;
+
+	TF2Items_SetNumAttributes(weapon, attributeCount);
+	for (new i = 0; i < attributeCount; i++)
+	{
+		new attributeIndex = StringToInt(attributesParts[i * 2]);
+		if (attributeIndex <= 0)
+		{
+			return ThrowError("Invalid attribute index (%s)", attributesParts[i * 2]);
+		}
+		TF2Items_SetAttribute(weapon, i, attributeIndex, StringToFloat(attributesParts[i * 2 + 1]));
+	}
+
+	new weaponEntity = TF2Items_GiveNamedItem(client, weapon);
+	EquipPlayerWeapon(client, weaponEntity);
+	CloseHandle(weapon);
+
+	if (autoSwitch)
+	{
+		SetEntProp(client, Prop_Send, "m_hActiveWeapon", weaponEntity);
+	}
+
+	return weaponEntity;
+}
+
+/**
+ *	Sets a players model
+ *
+ *	@param client	Client whose model to set
+ *	@param model	Path to the model
+ */
+stock BFF_SetPlayerModel(client, const String:model[])
+{
+	SetVariantString(model);
+	AcceptEntityInput(client, "SetCustomModel");
+	SetEntProp(client, Prop_Send, "m_bUseClassAnimations", 1);
+}
+
+/**
+ *	Sets a players class without killing them
+ *
+ *	@param client	Client to set class on
+ *	@param class	Class the client is set to
+ */
+stock BFF_SetPlayerClass(client, TFClassType:class)
+{
+	SetEntProp(client, Prop_Send, "m_lifeState", 2); // Set dead
+	TF2_SetPlayerClass(client, class, _, false);
+	SetEntProp(client, Prop_Send, "m_lifeState", 0); // Set alive
+}

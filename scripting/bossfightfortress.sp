@@ -51,6 +51,7 @@ new RoundState:g_eRoundState;
 // Who're the bosses!
 new g_bClientIsBoss[MAXPLAYERS+1];
 new Behaviour:g_hClientBossBehaviour[MAXPLAYERS+1]; // Faster lookup than natives
+new TFClassType:g_eClientBossClass[MAXPLAYERS+1];
 
 // Welcome to the Boss Health Management Center, how much health would you like?
 new g_iBossMaxHealth[MAXPLAYERS+1];
@@ -152,6 +153,13 @@ public bool:Gamma_IsGameModeAbleToStartRequest()
 		canStart = Gamma_BehaviourTypeHasBehaviours(g_hBossBehaviourType);
 	}
 
+	// We must have at least 2 or more players
+	if (canStart)
+	{
+		new playerCount = (GetTeamPlayerCount(TFTeam_Blue) + GetTeamPlayerCount(TFTeam_Red));
+		canStart = playerCount >= 2;
+	}
+
 	// We must also be sure we have a client to become the boss
 	if (canStart)
 	{
@@ -192,7 +200,11 @@ public Gamma_OnGameModeStart()
 	HookEvent("post_inventory_application", Event_PostInventoryApplication);
 	HookEvent("teamplay_round_win", Event_RoundWin);
 	HookEvent("player_hurt", Event_PlayerHurt);
+	HookEvent("player_changeclass", Event_PlayerChangeClass);
+	HookEvent("player_spawn", Event_PlayerSpawn);
 
+	AddCommandListener(Command_ChangeClass, "join_class");
+	AddCommandListener(Command_ChangeClass, "joinclass");
 	AddCommandListener(Command_JoinTeam, "jointeam");
 	AddCommandListener(Command_Taunt, "+taunt");
 	AddCommandListener(Command_Taunt, "taunt");
@@ -209,10 +221,15 @@ public Gamma_OnGameModeEnd(GameModeEndReason:reason)
 	UnhookEvent("post_inventory_application", Event_PostInventoryApplication);
 	UnhookEvent("teamplay_round_win", Event_RoundWin);
 	UnhookEvent("player_hurt", Event_PlayerHurt);
+	UnhookEvent("player_changeclass", Event_PlayerChangeClass);
+	UnhookEvent("player_spawn", Event_PlayerSpawn);
 
+	RemoveCommandListener(Command_ChangeClass, "join_class");
+	RemoveCommandListener(Command_ChangeClass, "joinclass");
 	RemoveCommandListener(Command_JoinTeam, "jointeam");
 	RemoveCommandListener(Command_Taunt, "+taunt");
 	RemoveCommandListener(Command_Taunt, "taunt");
+
 }
 
 /*******************************************************************************
@@ -230,7 +247,7 @@ public Event_ArenaRoundStart(Handle:event, const String:name[], bool:dontBroadca
 	for (new i = 1; i <= MaxClients; i++)
 	{
 		// If the client is a boss, get his max health!
-		if (IsClientInGame(i) && g_bClientIsBoss[i])
+		if (g_bClientIsBoss[i])
 		{
 			new health = Gamma_SimpleBehaviourFunctionCall(g_hClientBossBehaviour[i], "BFF_GetMaxHealth", _, float(enemyTeamCount));
 			g_iBossMaxHealth[i] = health;
@@ -252,6 +269,51 @@ public Event_RoundWin(Handle:event, const String:name[], bool:dontBroadcast)
 	g_eRoundState = RoundState_GameOver;
 }
 
+// No changey changey class for the boss! We can seemingly fully block class changing
+// with joinclass and join_class hooks, but we'll keep this just incase
+public Event_PlayerChangeClass(Handle:event, const String:name[], bool:dontBroadcast)
+{
+	// Let him change after gameover
+	if (g_eRoundState == RoundState_GameOver)
+	{
+		return;
+	}
+
+	new client = GetClientOfUserId(GetEventInt(event, "userid"));
+	if (g_bClientIsBoss[client])
+	{
+		if (GetEventInt(event, "class") != _:g_eClientBossClass[client])
+		{
+			CreateTimer(0.0, RevertBossClass, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+		}
+	}
+}
+
+// This is to fix a bug that appeared without my consent!
+public Action:Event_PlayerSpawn(Handle:event, const String:name[], bool:dontBroadcast)
+{
+	new client = GetClientOfUserId(GetEventInt(event, "userid"));
+	if (g_bClientIsBoss[client])
+	{
+		if (GetEventInt(event, "class") != _:g_eClientBossClass[client])
+		{
+			BFF_SetPlayerClass(client, g_eClientBossClass[client]);
+		}
+		// Should props always regenerate here
+		TF2_RegeneratePlayer(client);
+	}
+}
+
+public Action:RevertBossClass(Handle:timer, any:userid)
+{
+	new client = GetClientOfUserId(userid);
+	if (client != 0)
+	{
+		BFF_SetPlayerClass(client, g_eClientBossClass[client]);
+		TF2_RegeneratePlayer(client);
+	}
+}
+
 // Give the boss(es) the gear they don't deserve!
 public Event_PostInventoryApplication(Handle:event, const String:name[], bool:dontBroadcast)
 {
@@ -260,6 +322,61 @@ public Event_PostInventoryApplication(Handle:event, const String:name[], bool:do
 	{
 		EquipBoss(client);
 	}
+}
+
+public Action:Command_ChangeClass(client, const String:command[], argc)
+{
+	if (argc >= 1 && g_bClientIsBoss[client] && g_eRoundState != RoundState_GameOver)
+	{
+		new String:classname[32];
+		GetCmdArg(1, classname, sizeof(classname));
+
+		// At least set their desired class
+		new TFClassType:class = TFClass_Unknown;
+		if (StrEqual("scout", classname, false))
+		{
+			class = TFClass_Scout;
+		}
+		else if (StrEqual("solider", classname, false))
+		{
+			class = TFClass_Soldier;
+		}
+		else if (StrEqual("pyro", classname, false))
+		{
+			class = TFClass_Pyro;
+		}
+		else if (StrEqual("demoman", classname, false))
+		{
+			class = TFClass_DemoMan;
+		}
+		else if (StrEqual("heavyweapons", classname, false))
+		{
+			class = TFClass_Heavy;
+		}
+		else if (StrEqual("engineer", classname, false))
+		{
+			class = TFClass_Engineer;
+		}
+		else if (StrEqual("medic", classname, false))
+		{
+			class = TFClass_Medic;
+		}
+		else if (StrEqual("sniper", classname, false))
+		{
+			class = TFClass_Sniper;
+		}
+		else if (StrEqual("spy", classname, false))
+		{
+			class = TFClass_Spy;
+		}
+
+		if (class != TFClass_Unknown)
+		{
+			SetEntProp(client, Prop_Send, "m_iDesiredPlayerClass", _:class);
+		}
+		return Plugin_Handled;
+	}
+	return Plugin_Continue;
 }
 
 // Player tried to change team, it might be no good
@@ -434,6 +551,7 @@ public Gamma_OnBehaviourPossessedClient(client, Behaviour:behaviour)
 		g_hClientBossBehaviour[client] = behaviour;
 		g_bClientIsBoss[client] = true;
 		g_iBossMaxHealth[client] = 100;
+		g_eClientBossClass[client] = TF2_GetPlayerClass(client);
 
 		// Get our abilities
 		RetrieveChargeAbility(client, behaviour);
@@ -442,6 +560,7 @@ public Gamma_OnBehaviourPossessedClient(client, Behaviour:behaviour)
 		// Setup our hooks
 		SDKHook(client, SDKHook_PostThink, Internal_PostThink);
 		SDKHook(client, SDKHook_GetMaxHealth, Internal_GetMaxHealth);
+		SDKHook(client, SDKHook_OnTakeDamage, Internal_OnTakeDamage);
 		g_iTakeHealthHookIds[client] = DHookEntity(g_hTakeHealthHook, false, client);
 
 		// Create the format hud message function
@@ -562,6 +681,7 @@ public Gamma_OnBehaviourReleasedClient(client, Behaviour:behaviour, BehaviourRel
 		DHookRemoveHookID(g_iTakeHealthHookIds[client]);
 		SDKUnhook(client, SDKHook_PostThink, Internal_PostThink);
 		SDKUnhook(client, SDKHook_GetMaxHealth, Internal_GetMaxHealth);
+		SDKUnhook(client, SDKHook_OnTakeDamage, Internal_OnTakeDamage);
 		CloseHandle(g_hFormatBossNameMessage[client]);
 		CloseHandle(g_hBossHudUpdateTimer[client]);
 
@@ -578,6 +698,7 @@ public Gamma_OnBehaviourReleasedClient(client, Behaviour:behaviour, BehaviourRel
 
 		// Reset variables
 		g_bClientIsBoss[client] = false;
+		g_eClientBossClass[client] = TFClass_Unknown;
 		g_eBossChargeAbilityState[client] = AbilityState_None;
 		g_eBossTauntAbilityState[client] = AbilityState_None;
 		g_hClientBossBehaviour[client] = INVALID_BEHAVIOUR;
@@ -586,6 +707,9 @@ public Gamma_OnBehaviourReleasedClient(client, Behaviour:behaviour, BehaviourRel
 		g_hFormatBossNameMessage[client] = INVALID_HANDLE;
 		g_hBossHudUpdateTimer[client] = INVALID_HANDLE;
 		g_hBossTauntAbility[client] = INVALID_HANDLE;
+
+		// Reset model, just incase
+		BFF_SetPlayerModel(client, "");
 
 		// Check our round state to determine further actions
 		switch (g_eRoundState)
@@ -752,6 +876,25 @@ public Action:Internal_GetMaxHealth(this, &maxhealth)
 {
 	maxhealth = g_iBossMaxHealth[this];
 	return Plugin_Handled;
+}
+
+public Action:Internal_OnTakeDamage(victim, &attacker, &inflictor, &Float:damage, &damagetype, &weapon,
+		Float:damageForce[3], Float:damagePosition[3], damagecustom)
+{
+	if (damagecustom == TF_CUSTOM_BACKSTAB)
+	{
+		PrintToServer("backstabs");
+		damagetype |= DMG_CRIT;
+		damage = Pow(float(g_iBossMaxHealth[victim]), 0.70);
+		return Plugin_Changed;
+	}
+	if ((damagetype & DMG_FALL) == DMG_FALL)
+	{
+		PrintToServer("fall ouch");
+		damage = Pow(float(g_iBossMaxHealth[victim]), 0.60);
+		return Plugin_Changed;
+	}
+	return Plugin_Continue;
 }
 
 // We need a way of getting the 
@@ -944,13 +1087,6 @@ stock Float:GetTauntCooldownPercent(client)
 // Count players in a team!
 stock GetTeamPlayerCount(TFTeam:team)
 {
-	new count = 0;
-	for (new i = 1; i <= MaxClients; i++)
-	{
-		if (IsClientInGame(i) && GetClientTeam(i) == _:team)
-		{
-			count++;
-		}
-	}
-	return count;
+	// Uhhh, yeah, i found this after i wrote the stock, just wrapping it now since the "cast" is ugly
+	return GetTeamClientCount(_:team);
 }
