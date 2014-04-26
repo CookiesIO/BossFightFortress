@@ -18,14 +18,14 @@
 #include <bossfightfortress>
 #include <navmesh>
 
-// Our model, yay
-//#define BOSS_MODEL "models/bots/merasmus/merasmus.mdl"
-
 // Just because it might be nice to have later, but we don't want the warning
 #pragma unused g_hSorcererBoss
 
 // Storage variable for our little sorcerer
 new Behaviour:g_hSorcererBoss = INVALID_BEHAVIOUR;
+
+// Handles for continuous updates while the charge ability is active
+new Handle:g_hContinuousAbilityUpdateTimers[MAXPLAYERS+1];
 
 public Gamma_OnGameModeCreated(GameMode:gameMode)
 {
@@ -38,37 +38,46 @@ public Gamma_OnGameModeCreated(GameMode:gameMode)
 
 public Gamma_OnBehaviourPossessingClient(client)
 {
-	//if (!IsModelPrecached(BOSS_MODEL))
-	//{
-	//	PrecacheModel(BOSS_MODEL, true);
-	//}
-	//BFF_SetPlayerModel(client, BOSS_MODEL);
 	BFF_SetPlayerClass(client, TFClass_Spy);
 }
 
-public BFF_GetMaxHealth(Float:multiplier)
+public Gamma_OnBehaviourReleasingClient(client, BehaviourReleaseReason:reason)
+{
+	if (g_hContinuousAbilityUpdateTimers[client] != INVALID_HANDLE)
+	{
+		CloseHandle(g_hContinuousAbilityUpdateTimers[client]);
+		g_hContinuousAbilityUpdateTimers[client] = INVALID_HANDLE;
+	}
+}
+
+public BFF_GetMaxHealthRequest(Float:multiplier)
 {
 	return RoundToFloor(Pow(512.0 * multiplier, 1.1));
 }
 
-public BFF_EquipBoss(client)
+public BFF_OnEquipBoss(client)
 {
-	//TF2_RemoveAllWeapons(client);
-	//BFF_GiveItem(client, itemIndex, const String:classname[], const String:attributes[], quality=14, level=42, bool:autoSwitch=true)
+	TF2_RemoveAllWeapons2(client);
+	BFF_GiveItem(client, 574, "tf_weapon_knife", "156 ; 1");
 }
 
-public BFF_GetInitialTauntAbilityCooldown(&damageCooldown, &Float:timedCooldown)
+public BFF_GetInitialTauntAbilityCooldownRequest(&damageCooldown, &Float:timedCooldown)
 {
 	damageCooldown = 50;
 	timedCooldown = 10.0;
 }
 
-public bool:BFF_TauntAbilityUsed(client, &damageCooldown, &Float:timedCooldown)
+public bool:BFF_OnTauntAbilityUsed(client, Float:rechargePercent, &damageCooldown, &Float:timedCooldown)
 {
+	if (rechargePercent != 1.0)
+	{
+		return false;
+	}
+
 	if (NavMesh_Exists())
 	{
-		new playerCount = GetTeamClientCount(2) + GetTeamClientCount(3);
-		new zombieCount = playerCount * 3;
+		new playerCount = GetAlivePlayerCount();
+		new zombieCount = playerCount * 2;
 
 		new Handle:areas = NavMesh_GetAreas();
 		new areaCount = GetArraySize(areas);
@@ -80,38 +89,11 @@ public bool:BFF_TauntAbilityUsed(client, &damageCooldown, &Float:timedCooldown)
 			NavMeshArea_GetCenter(randomArea, areaCenter);
 			SpawnTFZombie(client, areaCenter);
 		}
-		// Spawn the zombies near the player, but not on (most of the time!)
-		/*for (new i = 1; i < MaxClients; i++)
-		{
-			if (IsClientInGame(i))
-			{
-				new Float:pos[3], Float:pos2[3];
-				GetClientAbsOrigin(i, pos);
-				for (new j = 0; j < 3; j++)
-				{
-					pos2[0] = pos[0] + GetRandomFloat(-300.0, 300.0);
-					pos2[1] = pos[1] + GetRandomFloat(-300.0, 300.0);
-					pos2[2] = pos[2];
-
-					new area = NavMesh_GetNearestArea(pos);
-					if (area != -1)
-					{
-						NavMeshArea_GetClosestPointOnArea(area, pos2, pos2);
-					}
-					else
-					{
-						pos2[0] = pos[0];
-						pos2[1] = pos[1];
-					}
-
-					SpawnTFZombie(client, pos2);
-				}
-			}
-		}*/
 	}
 	else
 	{
 		// Meh, no navmesh, just spawn directly under the player, we should have navmeshes, so why dont we!?
+		// Should probably replace this with an ability not involving bots
 		for (new i = 1; i < MaxClients; i++)
 		{
 			if (IsClientInGame(i))
@@ -129,6 +111,19 @@ public bool:BFF_TauntAbilityUsed(client, &damageCooldown, &Float:timedCooldown)
 	return true;
 }
 
+stock GetAlivePlayerCount()
+{
+	new count = 0;
+	for (new i = 1; i <= MaxClients; i++)
+	{
+		if (IsClientInGame(i) && IsPlayerAlive(i))
+		{
+			count++;
+		}
+	}
+	return count;
+}
+
 stock SpawnTFZombie(owner, const Float:pos[3])
 {
 	new zombie = CreateEntityByName("tf_zombie");
@@ -140,54 +135,59 @@ stock SpawnTFZombie(owner, const Float:pos[3])
 	TeleportEntity(zombie, pos, NULL_VECTOR, NULL_VECTOR);
 }
 
-
-/*public Float:BFF_GetChargeTime()
+public ChargeMode:BFF_GetChargeModeRequest()
 {
-	return 2.0;
-}*/
-
-public Float:BFF_ChargeAbilityUsed(boss, Float:charge)
-{
-	// Do nothing with less than 15% charge
-	if (charge < 0.15)
-	{
-		return 0.0;
-	}
-
-	new Float:angle[3];
-	GetClientEyeAngles(boss, angle);
-
-	if (angle[0] < -25)
-	{
-		// Booom.... superb jump, whatevs
-		new Float:velocity[3];
-
-		GetAngleVectors(angle, velocity, NULL_VECTOR, NULL_VECTOR);
-		NormalizeVector(velocity, velocity);
-		ScaleVector(velocity, 300 + (1000 * charge));
-
-		TeleportEntity(boss, NULL_VECTOR, NULL_VECTOR, velocity);
-
-		// 5 seconds cooldown
-		return 5.0;
-	}
-	// Else no cooldown, jump never initiated
-	return 0.0;
+	return ChargeMode_Continuous;
 }
 
-public BFF_FormatBossNameMessage(String:message[], maxlength, client)
+public Float:BFF_GetChargeTimeRequest()
+{
+	return 10.0;
+}
+
+public bool:BFF_OnChargeAbilityStart(client, Float:cooldown)
+{
+	TF2_AddCondition(client, TFCond_Cloaked);
+	TF2_AddCondition(client, TFCond_SpeedBuffAlly);
+
+	// Woop woop instant cloak!
+	SetEntPropFloat(client, Prop_Send, "m_flInvisChangeCompleteTime", GetGameTime());
+
+	g_hContinuousAbilityUpdateTimers[client] = CreateTimer(0.1, ContinuousAbilityUpdateTimer, client, TIMER_REPEAT);
+	return true;
+}
+
+public Float:BFF_OnChargeAbilityUsed(client, Float:charge)
+{
+	CloseHandle(g_hContinuousAbilityUpdateTimers[client]);
+	g_hContinuousAbilityUpdateTimers[client] = INVALID_HANDLE;
+
+	TF2_RemoveCondition(client, TFCond_Cloaked);
+	TF2_RemoveCondition(client, TFCond_SpeedBuffAlly);
+
+	// Woop woop instant uncloak!
+	SetEntPropFloat(client, Prop_Send, "m_flInvisChangeCompleteTime", GetGameTime());
+	return 10.0;
+}
+
+public Action:ContinuousAbilityUpdateTimer(Handle:timer, any:client)
+{
+	SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", 520.0);
+	SetEntPropFloat(client, Prop_Send, "m_flCloakMeter", 100.0);
+}
+
+public BFF_FormatBossNameMessageRequest(String:message[], maxlength, client)
 {
 	Format(message, maxlength, "The Sorcerer");
 }
 
-
-public BFF_FormatTauntAbilityMessage(String:message[], maxlength, client, AbilityState:tauntAbilityState, Float:tauntCooldownPercent)
+public BFF_FormatTauntAbilityMessageRequest(String:message[], maxlength, client, AbilityState:tauntAbilityState, tauntCooldownPercent)
 {	
 	switch (tauntAbilityState)
 	{
 		case AbilityState_OnCooldown:
 		{
-			Format(message, maxlength, "Skeleton horde %d%% recharged", RoundToFloor(tauntCooldownPercent * 100));
+			Format(message, maxlength, "Skeleton horde %d%% recharged", tauntCooldownPercent);
 		}
 		case AbilityState_Ready:
 		{
@@ -196,30 +196,13 @@ public BFF_FormatTauntAbilityMessage(String:message[], maxlength, client, Abilit
 	}
 }
 
-
-public BFF_FormatChargeAbilityMessage(String:message[], maxlength, client, AbilityState:chargeAbilityState, Float:chargeOrCooldown)
+public BFF_FormatChargeAbilityMessageRequest(String:message[], maxlength, client, AbilityState:chargeAbilityState, percent)
 {
 	switch (chargeAbilityState)
 	{
-		case AbilityState_Ready:
+		case AbilityState_Ready, AbilityState_Charging, AbilityState_OnCooldown:
 		{
-			Format(message, maxlength, "Lame jump ready");
-		}
-		case AbilityState_Charging:
-		{
-			Format(message, maxlength, "Lame jump %d%% charged", RoundToFloor(chargeOrCooldown * 100));
-		}
-		case AbilityState_OnCooldown:
-		{
-			new secondsLeft = RoundToFloor(chargeOrCooldown);
-			if (secondsLeft == 1)
-			{
-				Format(message, maxlength, "Lame jump ready in 1 second");
-			}
-			else
-			{
-				Format(message, maxlength, "Lame jump ready in %d seconds", secondsLeft);
-			}
+			Format(message, maxlength, "Continuous ability %d%% charged", percent);
 		}
 	}
 }

@@ -60,10 +60,19 @@ new Handle:g_hTakeHealthHook;
 new g_iTakeHealthHookIds[MAXPLAYERS+1];
 
 // Charge ability stuff, a charge ability is charged by holding +attack2
-new Float:g_fBossMaxChargeTime[MAXPLAYERS+1];
+new Float:g_fBossChargeActivationTime[MAXPLAYERS+1];
 new Float:g_fBossChargeTime[MAXPLAYERS+1];
-new Float:g_fBossChargeCooldown[MAXPLAYERS+1];
+
+new Float:g_fBossChargeCooldownActivationTime[MAXPLAYERS+1];
+new Float:g_fBossChargeCooldownTime[MAXPLAYERS+1];
+
+new Float:g_fCooldownPercentAtActivation[MAXPLAYERS+1];
+
 new AbilityState:g_eBossChargeAbilityState[MAXPLAYERS+1];
+new ChargeMode:g_eBossChargeAbilityMode[MAXPLAYERS+1];
+
+new Handle:g_hPrivate_OnChargeAbilityStart[MAXPLAYERS+1];
+new Handle:g_hPrivate_OnChargeAbilityUsed[MAXPLAYERS+1];
 
 // Taunt ability cooldown stuff, there's actually quite a lot of work!
 new CooldownMethod:g_eBossTauntCooldownMethod[MAXPLAYERS+1];
@@ -75,16 +84,16 @@ new Float:g_fBossTauntCooldownTime[MAXPLAYERS+1];
 new g_iBossTauntCooldownDamage[MAXPLAYERS+1];
 new g_iBossTauntCooldownDamageTaken[MAXPLAYERS+1];
 
-new Handle:g_hBossTauntAbility[MAXPLAYERS+1];
+new Handle:g_hPrivate_OnTauntAbilityUsed[MAXPLAYERS+1];
 
 // Hud Synchronizer
 new Handle:g_hStatusHud;
 
 // Hud stuffs
 new Handle:g_hBossHudUpdateTimer[MAXPLAYERS+1];
-new Handle:g_hFormatBossNameMessage[MAXPLAYERS+1];
-new Handle:g_hFormatTauntAbilityMessage[MAXPLAYERS+1];
-new Handle:g_hFormatChargeAbilityMessage[MAXPLAYERS+1];
+new Handle:g_hPrivate_FormatBossNameMessageRequest[MAXPLAYERS+1];
+new Handle:g_hPrivate_FormatTauntAbilityMessageRequest[MAXPLAYERS+1];
+new Handle:g_hPrivate_FormatChargeAbilityMessageRequest[MAXPLAYERS+1];
 
 // Meh, just keeping it for the queue that needs to be remade anyway
 new g_iCurrentBoss;
@@ -130,9 +139,9 @@ public Gamma_OnCreateGameMode()
 	// Create our Boss behaviour type, which boss behaviours use to extend our game mode with!
 	// Note, that behaviour types can only be created in Gamma_OnCreateGameMode
 	g_hBossBehaviourType = Gamma_CreateBehaviourType(BFF_BOSS_TYPE_NAME);
-	Gamma_AddBehaviourTypeRequirement(g_hBossBehaviourType, "BFF_GetMaxHealth");
-	Gamma_AddBehaviourTypeRequirement(g_hBossBehaviourType, "BFF_EquipBoss");
-	Gamma_AddBehaviourTypeRequirement(g_hBossBehaviourType, "BFF_FormatBossNameMessage");
+	Gamma_AddBehaviourTypeRequirement(g_hBossBehaviourType, "BFF_GetMaxHealthRequest");
+	Gamma_AddBehaviourTypeRequirement(g_hBossBehaviourType, "BFF_OnEquipBoss");
+	Gamma_AddBehaviourTypeRequirement(g_hBossBehaviourType, "BFF_FormatBossNameMessageRequest");
 }
 
 
@@ -249,7 +258,7 @@ public Event_ArenaRoundStart(Handle:event, const String:name[], bool:dontBroadca
 		// If the client is a boss, get his max health!
 		if (g_bClientIsBoss[i])
 		{
-			new health = Gamma_SimpleBehaviourFunctionCall(g_hClientBossBehaviour[i], "BFF_GetMaxHealth", _, float(enemyTeamCount));
+			new health = Gamma_SimpleBehaviourFunctionCall(g_hClientBossBehaviour[i], "BFF_GetMaxHealthRequest", _, float(enemyTeamCount));
 			g_iBossMaxHealth[i] = health;
 			SetEntProp(i, Prop_Send, "m_iHealth", g_iBossMaxHealth[i]);
 
@@ -284,8 +293,17 @@ public Event_PlayerChangeClass(Handle:event, const String:name[], bool:dontBroad
 	{
 		if (GetEventInt(event, "class") != _:g_eClientBossClass[client])
 		{
-			CreateTimer(0.0, RevertBossClass, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+			CreateTimer(0.0, DelayedRevertBossClassTimer, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
 		}
+	}
+}
+
+public Action:DelayedRevertBossClassTimer(Handle:timer, any:userid)
+{
+	new client = GetClientOfUserId(userid);
+	if (client != 0)
+	{
+		BFF_SetPlayerClass(client, g_eClientBossClass[client]);
 	}
 }
 
@@ -299,18 +317,6 @@ public Action:Event_PlayerSpawn(Handle:event, const String:name[], bool:dontBroa
 		{
 			BFF_SetPlayerClass(client, g_eClientBossClass[client]);
 		}
-		// Should props always regenerate here
-		TF2_RegeneratePlayer(client);
-	}
-}
-
-public Action:RevertBossClass(Handle:timer, any:userid)
-{
-	new client = GetClientOfUserId(userid);
-	if (client != 0)
-	{
-		BFF_SetPlayerClass(client, g_eClientBossClass[client]);
-		TF2_RegeneratePlayer(client);
 	}
 }
 
@@ -328,7 +334,7 @@ public Action:Command_ChangeClass(client, const String:command[], argc)
 {
 	if (argc >= 1 && g_bClientIsBoss[client] && g_eRoundState != RoundState_GameOver)
 	{
-		new String:classname[32];
+		new String:classname[16];
 		GetCmdArg(1, classname, sizeof(classname));
 
 		// At least set their desired class
@@ -405,46 +411,45 @@ public Action:Command_Taunt(client, const String:command[], argc)
 {
 	if (g_bClientIsBoss[client] && g_eRoundState != RoundState_Preround)
 	{
-		if (g_eBossTauntAbilityState[client] == AbilityState_Ready)
+		// Righto, call the taunt ability and check the returned cooldowns
+		new bool:result = true;
+		new damageCooldown = 0;
+		new Float:timedCooldown = 0.0;
+
+		Call_StartForward(g_hPrivate_OnTauntAbilityUsed[client]);
+		Call_PushCell(client);
+		Call_PushFloat(GetTauntCooldownPercent(client));
+		Call_PushCellRef(damageCooldown);
+		Call_PushFloatRef(timedCooldown);
+		Call_Finish(result);
+
+		if (result)
 		{
-			// Righto, our ability is ready, call the taunt ability and check the returned cooldowns
-			new bool:result = true;
-			new damageCooldown = 0;
-			new Float:timedCooldown = 0.0;
-
-			Call_StartForward(g_hBossTauntAbility[client]);
-			Call_PushCell(client);
-			Call_PushCellRef(damageCooldown);
-			Call_PushFloatRef(timedCooldown);
-			Call_Finish(result);
-
-			if (result)
+			// Get the new ability state
+			new AbilityState:tauntAbilityState = AbilityState_Ready;
+			new CooldownMethod:cooldownMethod = CooldownMethod_None;
+			if (damageCooldown > 0)
 			{
-				// Get the new ability state
-				new AbilityState:tauntAbilityState = AbilityState_Ready;
-				new CooldownMethod:cooldownMethod = CooldownMethod_None;
-				if (damageCooldown > 0)
-				{
-					cooldownMethod |= CooldownMethod_Damage;
-					g_iBossTauntCooldownDamage[client] = damageCooldown;
-					tauntAbilityState = AbilityState_OnCooldown;
-				}
-				if (timedCooldown > 0)
-				{
-					cooldownMethod |= CooldownMethod_Timed;
-					g_fBossTauntCooldownTime[client] = timedCooldown;
-					tauntAbilityState = AbilityState_OnCooldown;
-				}
-
-				// Now set the cooldown method and taunt ability state
-				g_eBossTauntCooldownMethod[client] = cooldownMethod;
-				g_eBossTauntAbilityState[client] = tauntAbilityState;
-				g_fBossTauntCooldownActivationTime[client] = GetGameTime();
-
-				UpdateHud(client);
-				return Plugin_Handled;
+				cooldownMethod |= CooldownMethod_Damage;
+				g_iBossTauntCooldownDamage[client] = damageCooldown;
+				tauntAbilityState = AbilityState_OnCooldown;
 			}
+			if (timedCooldown > 0)
+			{
+				cooldownMethod |= CooldownMethod_Timed;
+				g_fBossTauntCooldownTime[client] = timedCooldown;
+				tauntAbilityState = AbilityState_OnCooldown;
+			}
+
+			// Now set the cooldown method and taunt ability state
+			g_eBossTauntCooldownMethod[client] = cooldownMethod;
+			g_eBossTauntAbilityState[client] = tauntAbilityState;
+			g_fBossTauntCooldownActivationTime[client] = GetGameTime();
+
+			UpdateHud(client);
+			return Plugin_Handled;
 		}
+		
 		// If our ability didn't activate and but it's been less than 1 second since last activation
 		// Stop us from taunting
 		new Float:cooldownActivationTime = g_fBossTauntCooldownActivationTime[client];
@@ -456,18 +461,6 @@ public Action:Command_Taunt(client, const String:command[], argc)
 	return Plugin_Continue;
 }
 
-// Equip boss, slightly delayed... But just once, only once, PostInventoryApplication should handle the rest
-public Action:EquipBossTimer(Handle:timer, any:userid)
-{
-	// justtobesaferight?
-	new client = GetClientOfUserId(userid);
-	if (client)
-	{
-		EquipBoss(client);
-		SetEntProp(client, Prop_Send, "m_iHealth", g_iBossMaxHealth[client]);
-	}
-}
-
 // Draw Hud to the client ... OHMIGOD PASSING IN THE CLIENT INDEX!?
 // Don't worry, the client will always be ingame when the timer runs as he loses his behaviour when he disconnects
 public Action:UpdateHudTimer(Handle:timer, any:client)
@@ -476,7 +469,7 @@ public Action:UpdateHudTimer(Handle:timer, any:client)
 	new String:buffer[64];
 
 	// Format the boss name message
-	Call_StartForward(g_hFormatBossNameMessage[client]);
+	Call_StartForward(g_hPrivate_FormatBossNameMessageRequest[client]);
 	Call_PushStringEx(buffer, sizeof(buffer), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 	Call_PushCell(sizeof(buffer));
 	Call_PushCell(client);
@@ -490,18 +483,22 @@ public Action:UpdateHudTimer(Handle:timer, any:client)
 		// Don't forget to clear buffer
 		buffer[0] = '\0';
 
-		Call_StartForward(g_hFormatTauntAbilityMessage[client]);
+		Call_StartForward(g_hPrivate_FormatTauntAbilityMessageRequest[client]);
 		Call_PushStringEx(buffer, sizeof(buffer), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 		Call_PushCell(sizeof(buffer));
 		Call_PushCell(client);
 		Call_PushCell(g_eBossTauntAbilityState[client]);
 
-		// Round to floored percentage with the accuracy defined
-		Call_PushFloat(RoundToFloor((GetTauntCooldownPercent(client) * (1/HUD_PERCENTAGE_ACCURACY_FLOAT))) * HUD_PERCENTAGE_ACCURACY_FLOAT);
+		// Adjust the cooldown percent before pushing it to the call
+		Call_PushCell(AdjustFloatPercent(GetTauntCooldownPercent(client)));
 		
 		Call_Finish();
 
-		Format(message, sizeof(message), "%s\n%s", message, buffer);
+		// Damnit it, why does a single % disappear when it's passed as a parameter to Format!?
+		ReplaceString(buffer, sizeof(buffer), "%", "%%");
+
+		StrCat(message, sizeof(message), "\n");
+		StrCat(message, sizeof(message), buffer);
 	}
 
 	// Format the charge ability message, if we have it
@@ -510,26 +507,22 @@ public Action:UpdateHudTimer(Handle:timer, any:client)
 		// Don't forget to clear buffer
 		buffer[0] = '\0';
 
-		Call_StartForward(g_hFormatChargeAbilityMessage[client]);
+		Call_StartForward(g_hPrivate_FormatChargeAbilityMessageRequest[client]);
 		Call_PushStringEx(buffer, sizeof(buffer), SM_PARAM_STRING_UTF8|SM_PARAM_STRING_COPY, SM_PARAM_COPYBACK);
 		Call_PushCell(sizeof(buffer));
 		Call_PushCell(client);
 		Call_PushCell(g_eBossChargeAbilityState[client]);
 
-		if (g_eBossChargeAbilityState[client] == AbilityState_OnCooldown)
-		{
-			// Round to ceil, since we don't want to show 0 seconds left in the cooldown
-			Call_PushFloat(float(RoundToCeil(g_fBossChargeCooldown[client] - GetGameTime())));
-		}
-		else
-		{
-			// Round to floored percentage with the accuracy defined
-			Call_PushFloat(RoundToFloor((GetChargePercent(client) * (1/HUD_PERCENTAGE_ACCURACY_FLOAT))) * HUD_PERCENTAGE_ACCURACY_FLOAT);
-		}
+		// Adjust our charge percent before pushing it to the call
+		Call_PushCell(AdjustFloatPercent(GetChargePercent(client)));
 
 		Call_Finish();
 
-		Format(message, sizeof(message), "%s\n%s", message, buffer);
+		// Damnit it, why does a single % disappear when it's passed as a parameter to Format!?
+		ReplaceString(buffer, sizeof(buffer), "%", "%%");
+
+		StrCat(message, sizeof(message), "\n");
+		StrCat(message, sizeof(message), buffer);
 	}
 
 	// Display time: 10, we don't want it to flicker so we doubled display time compared to timer repeat time
@@ -564,49 +557,68 @@ public Gamma_OnBehaviourPossessedClient(client, Behaviour:behaviour)
 		g_iTakeHealthHookIds[client] = DHookEntity(g_hTakeHealthHook, false, client);
 
 		// Create the format hud message function
-		g_hFormatBossNameMessage[client] = CreateForward(ET_Single, Param_String, Param_Cell, Param_Cell);
-		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_FormatBossNameMessage", g_hFormatBossNameMessage[client]);
+		g_hPrivate_FormatBossNameMessageRequest[client] = CreateForward(ET_Single, Param_String, Param_Cell, Param_Cell);
+		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_FormatBossNameMessageRequest", g_hPrivate_FormatBossNameMessageRequest[client]);
 
 		// And lets not forget to create our Hud timer
 		g_hBossHudUpdateTimer[client] = CreateTimer(5.0, UpdateHudTimer, client, TIMER_REPEAT);
 		UpdateHud(client);
 
-		// Equip the boss, buy delay it a bit
-		CreateTimer(0.1, EquipBossTimer, GetClientUserId(client));
+		// Regenerate the boss, if he's changed late we don't want leftovers all over him
+		CreateTimer(0.0, DelayedRegenerationTimer, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	}
+}
+
+public Action:DelayedRegenerationTimer(Handle:timer, any:userid)
+{
+	new client = GetClientOfUserId(userid);
+	if (client)
+	{
+		TF2_RegeneratePlayer(client);
+		SetEntProp(client, Prop_Send, "m_iHealth", g_iBossMaxHealth[client]);
 	}
 }
 
 stock RetrieveChargeAbility(client, Behaviour:behaviour)
 {
-	// Uhhh, woops, hax needed, the only way to get byref args
-	static Handle:getChargeTimeFwd = INVALID_HANDLE;
-	if (getChargeTimeFwd == INVALID_HANDLE)
+	// Check if the required functions are present
+	if (Gamma_BehaviourHasFunction(behaviour, "BFF_OnChargeAbilityUsed") &&
+		Gamma_BehaviourHasFunction(behaviour, "BFF_GetChargeTimeRequest") &&
+		Gamma_BehaviourHasFunction(behaviour, "BFF_FormatChargeAbilityMessageRequest"))
 	{
-		getChargeTimeFwd = CreateForward(ET_Single);
-	}
+		new Float:chargeTime = Float:Gamma_SimpleBehaviourFunctionCall(behaviour, "BFF_GetChargeTimeRequest", 0.0);
+		new ChargeMode:chargeMode = ChargeMode:Gamma_SimpleBehaviourFunctionCall(behaviour, "BFF_GetChargeModeRequest", ChargeMode_Normal);
 
-	// Add the function to the forward
-	if (Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_GetChargeTime", getChargeTimeFwd))
-	{
-		new Float:chargeTime;
+		if (Gamma_BehaviourHasFunction(behaviour, "BFF_OnChargeAbilityStart"))
+		{
+			// Optional optin to listen when the charge starts (and possibly block)
+			g_hPrivate_OnChargeAbilityStart[client] = CreateForward(ET_Single, Param_Cell, Param_Float);
+			Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_OnChargeAbilityStart", g_hPrivate_OnChargeAbilityStart[client]);
+		}
+		// We must have BFF_OnChargeAbilityStart implemented for continuous mode
+		else if (chargeMode == ChargeMode_Continuous)
+		{
+			g_eBossChargeAbilityState[client] = AbilityState_None;
+			return;
+		}
 
-		// Call the forward and get the charge time!
-		Call_StartForward(getChargeTimeFwd);
-		Call_Finish(chargeTime);
-
+		// Clamp to 0..inf 
 		if (chargeTime < 0.0)
 		{
-			chargeTime = 1.0;
+			chargeTime = 0.0;
 		}
+
+		g_eBossChargeAbilityMode[client] = chargeMode;
 		g_eBossChargeAbilityState[client] = AbilityState_Ready;
-		g_fBossMaxChargeTime[client] = chargeTime;
+		g_fBossChargeTime[client] = chargeTime;
+
+		// Get the taunt ability used function
+		g_hPrivate_OnChargeAbilityUsed[client] = CreateForward(ET_Single, Param_Cell, Param_Float);
+		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_OnChargeAbilityUsed", g_hPrivate_OnChargeAbilityUsed[client]);
 
 		// Get the charge ability message formatter function
-		g_hFormatChargeAbilityMessage[client] = CreateForward(ET_Single, Param_String, Param_Cell, Param_Cell, Param_Cell, Param_Float);
-		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_FormatChargeAbilityMessage", g_hFormatChargeAbilityMessage[client]);
-
-		// Don't forget to clear the forward!
-		Gamma_RemoveBehaviourFunctionFromForward(behaviour, "BFF_GetChargeTime", getChargeTimeFwd);
+		g_hPrivate_FormatChargeAbilityMessageRequest[client] = CreateForward(ET_Single, Param_String, Param_Cell, Param_Cell, Param_Cell, Param_Cell);
+		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_FormatChargeAbilityMessageRequest", g_hPrivate_FormatChargeAbilityMessageRequest[client]);
 	}
 	else
 	{
@@ -616,55 +628,65 @@ stock RetrieveChargeAbility(client, Behaviour:behaviour)
 
 stock RetrieveTauntAbility(client, Behaviour:behaviour)
 {
-	// Uhhh, woops, hax needed, the only way to get byref args
-	static Handle:getInitialTauntAbilityCooldownFwd = INVALID_HANDLE;
-	if (getInitialTauntAbilityCooldownFwd == INVALID_HANDLE)
+	if (Gamma_BehaviourHasFunction(behaviour, "BFF_OnTauntAbilityUsed") &&
+		Gamma_BehaviourHasFunction(behaviour, "BFF_FormatTauntAbilityMessageRequest"))
 	{
-		getInitialTauntAbilityCooldownFwd = CreateForward(ET_Single, Param_CellByRef, Param_FloatByRef);
-	}
-
-	// Add the function to the forward
-	if (Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_GetInitialTauntAbilityCooldown", getInitialTauntAbilityCooldownFwd))
-	{
-		new damageCooldown = 0;
-		new Float:timedCooldown = 0.0;
-
-		// Call the forward and get the result!
-		Call_StartForward(getInitialTauntAbilityCooldownFwd);
-		Call_PushCellRef(damageCooldown);
-		Call_PushFloatRef(timedCooldown);
-		Call_Finish();
-
-		// First, we need to get see if either or both of damage and timed cooldowns are set
-		new AbilityState:tauntAbilityState = AbilityState_Ready;
-		new CooldownMethod:cooldownMethod = CooldownMethod_None;
-		if (damageCooldown > 0)
+		// Uhhh, woops, hax needed, the only way to get byref args
+		static Handle:getInitialTauntAbilityCooldownRequestForward = INVALID_HANDLE;
+		if (getInitialTauntAbilityCooldownRequestForward == INVALID_HANDLE)
 		{
-			cooldownMethod |= CooldownMethod_Damage;
-			g_iBossTauntCooldownDamage[client] = damageCooldown;
-			tauntAbilityState = AbilityState_OnCooldown;
-		}
-		if (timedCooldown > 0)
-		{
-			cooldownMethod |= CooldownMethod_Timed;
-			g_fBossTauntCooldownTime[client] = timedCooldown;
-			tauntAbilityState = AbilityState_OnCooldown;
+			getInitialTauntAbilityCooldownRequestForward = CreateForward(ET_Single, Param_CellByRef, Param_FloatByRef);
 		}
 
-		// Now set the cooldown method and taunt ability state
-		g_eBossTauntCooldownMethod[client] = cooldownMethod;
-		g_eBossTauntAbilityState[client] = tauntAbilityState;
+		// Add the function to the forward
+		if (Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_GetInitialTauntAbilityCooldownRequest", getInitialTauntAbilityCooldownRequestForward))
+		{
+			new damageCooldown = 0;
+			new Float:timedCooldown = 0.0;
 
-		// Get the BFF_TauntAbilityUsed function
-		g_hBossTauntAbility[client] = CreateForward(ET_Single, Param_Cell, Param_CellByRef, Param_FloatByRef);
-		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_TauntAbilityUsed", g_hBossTauntAbility[client]);
+			// Call the forward and get the result!
+			Call_StartForward(getInitialTauntAbilityCooldownRequestForward);
+			Call_PushCellRef(damageCooldown);
+			Call_PushFloatRef(timedCooldown);
+			Call_Finish();
+
+			// First, we need to get see if either or both of damage and timed cooldowns are set
+			new AbilityState:tauntAbilityState = AbilityState_Ready;
+			new CooldownMethod:cooldownMethod = CooldownMethod_None;
+			if (damageCooldown > 0)
+			{
+				cooldownMethod |= CooldownMethod_Damage;
+				g_iBossTauntCooldownDamage[client] = damageCooldown;
+				tauntAbilityState = AbilityState_OnCooldown;
+			}
+			if (timedCooldown > 0)
+			{
+				cooldownMethod |= CooldownMethod_Timed;
+				g_fBossTauntCooldownTime[client] = timedCooldown;
+				tauntAbilityState = AbilityState_OnCooldown;
+			}
+
+			// Now set the cooldown method and taunt ability state
+			g_eBossTauntCooldownMethod[client] = cooldownMethod;
+			g_eBossTauntAbilityState[client] = tauntAbilityState;
+
+			// Don't forget to clear the forward!
+			Gamma_RemoveBehaviourFunctionFromForward(behaviour, "BFF_GetInitialTauntAbilityCooldownRequest", getInitialTauntAbilityCooldownRequestForward);
+		}
+		else
+		{
+			// Now set the cooldown method and taunt ability state
+			g_eBossTauntCooldownMethod[client] = CooldownMethod_None;
+			g_eBossTauntAbilityState[client] = AbilityState_Ready;
+		}
+
+		// Get the BFF_OnTauntAbilityUsed function
+		g_hPrivate_OnTauntAbilityUsed[client] = CreateForward(ET_Single, Param_Cell, Param_Float, Param_CellByRef, Param_FloatByRef);
+		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_OnTauntAbilityUsed", g_hPrivate_OnTauntAbilityUsed[client]);
 
 		// Get the taunt ability message formatter function
-		g_hFormatTauntAbilityMessage[client] = CreateForward(ET_Single, Param_String, Param_Cell, Param_Cell, Param_Cell, Param_Float);
-		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_FormatTauntAbilityMessage", g_hFormatTauntAbilityMessage[client]);
-
-		// Don't forget to clear the forward!
-		Gamma_RemoveBehaviourFunctionFromForward(behaviour, "BFF_GetInitialTauntAbilityCooldown", getInitialTauntAbilityCooldownFwd);
+		g_hPrivate_FormatTauntAbilityMessageRequest[client] = CreateForward(ET_Single, Param_String, Param_Cell, Param_Cell, Param_Cell, Param_Cell);
+		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_FormatTauntAbilityMessageRequest", g_hPrivate_FormatTauntAbilityMessageRequest[client]);
 	}
 	else
 	{
@@ -682,31 +704,42 @@ public Gamma_OnBehaviourReleasedClient(client, Behaviour:behaviour, BehaviourRel
 		SDKUnhook(client, SDKHook_PostThink, Internal_PostThink);
 		SDKUnhook(client, SDKHook_GetMaxHealth, Internal_GetMaxHealth);
 		SDKUnhook(client, SDKHook_OnTakeDamage, Internal_OnTakeDamage);
-		CloseHandle(g_hFormatBossNameMessage[client]);
+		CloseHandle(g_hPrivate_FormatBossNameMessageRequest[client]);
 		CloseHandle(g_hBossHudUpdateTimer[client]);
 
 		if (g_eBossChargeAbilityState[client] != AbilityState_None)
 		{
-			CloseHandle(g_hFormatChargeAbilityMessage[client]);
+			// Since this is only optional, check the handle
+			if (g_hPrivate_OnChargeAbilityStart[client] != INVALID_HANDLE)
+			{
+				CloseHandle(g_hPrivate_OnChargeAbilityStart[client]);
+			}
+			CloseHandle(g_hPrivate_OnChargeAbilityUsed[client]);
+			CloseHandle(g_hPrivate_FormatChargeAbilityMessageRequest[client]);
 		}
 
 		if (g_eBossTauntAbilityState[client] != AbilityState_None)
 		{
-			CloseHandle(g_hBossTauntAbility[client]);
-			CloseHandle(g_hFormatTauntAbilityMessage[client]);
+			CloseHandle(g_hPrivate_OnTauntAbilityUsed[client]);
+			CloseHandle(g_hPrivate_FormatTauntAbilityMessageRequest[client]);
 		}
 
 		// Reset variables
 		g_bClientIsBoss[client] = false;
 		g_eClientBossClass[client] = TFClass_Unknown;
-		g_eBossChargeAbilityState[client] = AbilityState_None;
-		g_eBossTauntAbilityState[client] = AbilityState_None;
 		g_hClientBossBehaviour[client] = INVALID_BEHAVIOUR;
-		g_hFormatChargeAbilityMessage[client] = INVALID_HANDLE;
-		g_hFormatTauntAbilityMessage[client] = INVALID_HANDLE;
-		g_hFormatBossNameMessage[client] = INVALID_HANDLE;
+
+		g_eBossChargeAbilityState[client] = AbilityState_None;
+		g_hPrivate_FormatChargeAbilityMessageRequest[client] = INVALID_HANDLE;
+		g_hPrivate_OnChargeAbilityStart[client] = INVALID_HANDLE;
+		g_hPrivate_OnChargeAbilityUsed[client] = INVALID_HANDLE;
+
+		g_eBossTauntAbilityState[client] = AbilityState_None;
+		g_hPrivate_FormatTauntAbilityMessageRequest[client] = INVALID_HANDLE;
+		g_hPrivate_OnTauntAbilityUsed[client] = INVALID_HANDLE;
+
 		g_hBossHudUpdateTimer[client] = INVALID_HANDLE;
-		g_hBossTauntAbility[client] = INVALID_HANDLE;
+		g_hPrivate_FormatBossNameMessageRequest[client] = INVALID_HANDLE;
 
 		// Reset model, just incase
 		BFF_SetPlayerModel(client, "");
@@ -776,17 +809,11 @@ public Internal_PostThink(this)
 	// Store the last buttons, we wanna know if the player was holding IN_ATTACK2
 	static lastButtons[MAXPLAYERS+1];
 
-	// We also wanna know the last charge percent, so we know when to update the Hud
-	static lastChargePercent[MAXPLAYERS+1];
-
-	// And lastly we wanna know the last (ceiled) charge cooldown time, again so we can update the Hud
-	static lastCeiledChargeCooldownTime[MAXPLAYERS+1];
-
 	//If we're on cooldown, and we're timed as well, update cooldown percent and update the Hud as needed
 	if (g_eBossTauntAbilityState[this] == AbilityState_OnCooldown &&
 		(g_eBossTauntCooldownMethod[this] & CooldownMethod_Timed) == CooldownMethod_Timed)
 	{
-		UpdateCooldownMethod(this);
+		UpdateTauntCooldown(this);
 	}
 
 	// No need to go any further if we don't have a charge ability
@@ -795,80 +822,191 @@ public Internal_PostThink(this)
 		return;
 	}
 
+	// Get the clients buttons and handle the charge ability
+	new buttons = GetClientButtons(this);
+
+	HandleChargeAbility(this, lastButtons[this], buttons);
+
+	lastButtons[this] = buttons;
+	return;
+}
+
+stock HandleChargeAbility(client, lastButtons, buttons)
+{
+	// Store whether or not IN_ATTACK2 was released since charging started (used for continuous abilities)
+	static bool:releasedInAttack2SinceChargeStart[MAXPLAYERS+1] = { true, ... };
+
+	// And we wanna know the last (ceiled) charge cooldown time, again so we can update the Hud
+	static lastCeiledChargeCooldownTimeLeft[MAXPLAYERS+1];
+
+	// We also wanna know the last charge percent, so we know when to update the Hud
+	static lastChargePercent[MAXPLAYERS+1];
+
 	//If we're on cooldown, check the time and update the Hud as needed
-	if (g_eBossChargeAbilityState[this] == AbilityState_OnCooldown)
+	if (g_eBossChargeAbilityState[client] == AbilityState_OnCooldown)
 	{
-		// If the last floored cooldown time is higher than the current, update Hud
-		new ceiledCooldownTime = RoundToCeil(g_fBossChargeCooldown[this] - GetGameTime());
-		if (lastCeiledChargeCooldownTime[this] > ceiledCooldownTime)
+		// Update hud if cooldown percent has passed 5, 10, ... 95, 100%
+		new lChargePercent = lastChargePercent[client];
+		new cChargePercent = RoundToFloor(GetChargePercent(client) * 100);
+		new chargeDifference = cChargePercent - lChargePercent;
+		if (chargeDifference >= HUD_PERCENTAGE_ACCURACY)
 		{
-			// Check if the cooldown time is over
-			if (ceiledCooldownTime <= 0)
+			// Update last charge percent, in case of fast charge times, update correctly accordingly
+			lastChargePercent[client] += (chargeDifference - (chargeDifference % HUD_PERCENTAGE_ACCURACY));
+
+			// Check if fully cooled down
+			if (cChargePercent == 100)
 			{
-				g_eBossChargeAbilityState[this] = AbilityState_Ready;
+				lastChargePercent[client] = 0;
+				g_eBossChargeAbilityState[client] = AbilityState_Ready;
 			}
-			lastCeiledChargeCooldownTime[this] = ceiledCooldownTime;
-			UpdateHud(this);
+
+			UpdateHud(client);
 		}
 
-		// There's no need for us to get the client buttons when we're on cooldown
-		return;
+		// There's no need for us to get the client buttons when we're on cooldown (with ChargeMode_Normal)
+		if (g_eBossChargeAbilityMode[client] == ChargeMode_Normal)
+		{
+			return;
+		}
 	}
 
-	// Get the clients buttons and check for IN_ATTACK2
-	new buttons = GetClientButtons(this);
+
 	if ((buttons & IN_ATTACK2) == IN_ATTACK2)
 	{
 		// Charging can begin when the client is not charging and when the cooldown has ended
-		switch (g_eBossChargeAbilityState[this])
+		switch (g_eBossChargeAbilityState[client])
 		{
-			case AbilityState_Ready:
+			case AbilityState_Ready,
+				 AbilityState_OnCooldown: // When using ChargeMode_Continuous
 			{
-				g_eBossChargeAbilityState[this] = AbilityState_Charging;
-				g_fBossChargeTime[this] = GetGameTime();
-				UpdateHud(this);
+				if (releasedInAttack2SinceChargeStart[client])
+				{
+					new Float:cooldownPercent = GetChargePercent(client);
+
+					// Our start listener, we'll see if we have it
+					if (g_hPrivate_OnChargeAbilityStart[client] != INVALID_HANDLE)
+					{
+						new bool:result = true;
+
+						Call_StartForward(g_hPrivate_OnChargeAbilityStart[client]);
+						Call_PushCell(client);
+						Call_PushFloat(cooldownPercent);
+						Call_Finish(result);
+
+						// Okay, it doesn't want to start charging, too bad
+						if (!result)
+						{
+							return;
+						}
+					}
+
+					// Set the charge time slightly back, depending on the cooldownPercent, so it starts at the right %
+					g_fCooldownPercentAtActivation[client] = cooldownPercent;
+					g_fBossChargeActivationTime[client] = (GetGameTime() - (g_fBossChargeTime[client] * (1 - cooldownPercent))); 
+					g_eBossChargeAbilityState[client] = AbilityState_Charging;
+
+					// For the continuous mode, 0 just ain't working for lastChargePercent, set it to 100, yup
+					if (g_eBossChargeAbilityMode[client] == ChargeMode_Continuous)
+					{
+						lastChargePercent[client] = 100;
+					}
+					else
+					{
+						lastChargePercent[client] = 0;
+					}
+
+					// We just started charging, set this to false as we don't want to be able to hold down teh mouse button to
+					// spam the server with charge start/charge used calls
+					releasedInAttack2SinceChargeStart[client] = false;
+
+					UpdateHud(client);
+				}
 			}
 			case AbilityState_Charging:
 			{
-				// Update hud if charge percent has passed 10, 20, ... 90, 100%
-				new lChargePercent = lastChargePercent[this];
-				new cChargePercent = RoundToFloor(GetChargePercent(this) * 100);
+				// Update hud if charge percent has passed 5, 10, ... 95, 100%
+				new lChargePercent = lastChargePercent[client];
+				new cChargePercent = AdjustFloatPercent(GetChargePercent(client));
 				new chargeDifference = cChargePercent - lChargePercent;
-				if (chargeDifference >= HUD_PERCENTAGE_ACCURACY)
+
+				// We have 2 charge modes that act differently in this manner
+				if (g_eBossChargeAbilityMode[client] == ChargeMode_Normal)
 				{
-					UpdateHud(this);
-					// Update last charge percent, in case of fast charge times, update correctly accordingly
-					lastChargePercent[this] += (chargeDifference - (chargeDifference % HUD_PERCENTAGE_ACCURACY));
+					if (chargeDifference > 0)
+					{
+						UpdateHud(client);
+					}
 				}
+				else
+				{
+					if (chargeDifference < 0)
+					{
+						if (cChargePercent == 0)
+						{
+							// Activate charge ability, as we've hit 0% charge using continuous mode
+							new Float:cooldownTime = ClientUsedChargeAbility(client);
+							lastCeiledChargeCooldownTimeLeft[client] = RoundToCeil(cooldownTime);
+						}
+
+						UpdateHud(client);
+					}
+				}
+				lastChargePercent[client] = cChargePercent;
 			}
 		}
 	}
-	else if ((lastButtons[this] & IN_ATTACK2) == IN_ATTACK2 && g_eBossChargeAbilityState[this] == AbilityState_Charging)
+	else if ((lastButtons & IN_ATTACK2) == IN_ATTACK2)
 	{
-		// Get charge percent and send the ChargeAbilityUsed message to the behaviour!
-		new Float:chargePercent = GetChargePercent(this);
-		new Float:cooldown = Float:Gamma_SimpleBehaviourFunctionCall(g_hClientBossBehaviour[this], "BFF_ChargeAbilityUsed", _, this, chargePercent);
-		
-		if (cooldown <= 0.0)
+		if (g_eBossChargeAbilityState[client] == AbilityState_Charging)
 		{
-			// Cooldown time less than or equal 0 means instant readiness
-			g_eBossChargeAbilityState[this] = AbilityState_Ready;
+			// Activate charge ability
+			new Float:cooldownTime = ClientUsedChargeAbility(client);
+			lastCeiledChargeCooldownTimeLeft[client] = RoundToCeil(cooldownTime);
+
+			// Reset charge last charge percent, so it's ready for cooldown!
+			lastChargePercent[client] = 0;
+
+			UpdateHud(client);
+		}
+
+		// Yup, now we've released since starting charging, so set this to true
+		releasedInAttack2SinceChargeStart[client] = true;
+	}
+}
+
+stock Float:ClientUsedChargeAbility(client)
+{
+	// Get charge percent and send the ChargeAbilityUsed message to the behaviour!
+	new Float:chargePercent = GetChargePercent(client);
+	new Float:cooldownTime = 0.0;
+
+	Call_StartForward(g_hPrivate_OnChargeAbilityUsed[client]);
+	Call_PushCell(client);
+	Call_PushFloat(chargePercent);
+	Call_Finish(cooldownTime);
+	
+	if (cooldownTime <= 0.0)
+	{
+		// Cooldown time less than or equal 0 means instant readiness
+		g_eBossChargeAbilityState[client] = AbilityState_Ready;
+	}
+	else
+	{
+		// Set cooldown time
+		if (g_eBossChargeAbilityMode[client] == ChargeMode_Continuous)
+		{
+			g_fBossChargeCooldownActivationTime[client] = (GetGameTime() - (cooldownTime * (chargePercent)));
 		}
 		else
 		{
-			// Set cooldown time
-			g_fBossChargeCooldown[this] = GetGameTime() + cooldown;
-			g_eBossChargeAbilityState[this] = AbilityState_OnCooldown;
-			lastCeiledChargeCooldownTime[this] = RoundToCeil(cooldown);
+			g_fBossChargeCooldownActivationTime[client] = GetGameTime();
 		}
 
-		// Reset charge variables
-		lastChargePercent[this] = 0;
-
-		UpdateHud(this);
+		g_fBossChargeCooldownTime[client] = cooldownTime;
+		g_eBossChargeAbilityState[client] = AbilityState_OnCooldown;
 	}
-	lastButtons[this] = buttons;
-	return;
+	return cooldownTime;
 }
 
 // Get max health, we override this for our bosses to return g_iBossMaxHealth[this], always
@@ -885,7 +1023,7 @@ public Action:Internal_OnTakeDamage(victim, &attacker, &inflictor, &Float:damage
 	{
 		PrintToServer("backstabs");
 		damagetype |= DMG_CRIT;
-		damage = Pow(float(g_iBossMaxHealth[victim]), 0.70);
+		damage = Pow(float(g_iBossMaxHealth[victim]), 0.65);
 		return Plugin_Changed;
 	}
 	if ((damagetype & DMG_FALL) == DMG_FALL)
@@ -908,7 +1046,7 @@ public Event_PlayerHurt(Handle:event, const String:name[], bool:dontBroadcast)
 		{
 			new damage = GetEventInt(event, "damageamount");
 			g_iBossTauntCooldownDamageTaken[client] += damage;
-			UpdateCooldownMethod(client);
+			UpdateTauntCooldown(client);
 		}
 	}
 }
@@ -942,7 +1080,7 @@ public MRESReturn:Internal_TakeHealth(this, Handle:hReturn, Handle:hParams)
  *******************************************************************************/
 
 // Updates the taunt ability charge in the hud, if needed
-stock UpdateCooldownMethod(client)
+stock UpdateTauntCooldown(client)
 {
 	// Hold the last floored cooldown percent, we use this to update the hud if neccesary
 	static lastCooldownPercent[MAXPLAYERS+1];
@@ -1007,7 +1145,7 @@ stock GetNextInQueue()
 // Calls BFF_EquipBoss in the the behaviour plugin
 stock EquipBoss(client)
 {
-	Gamma_SimpleBehaviourFunctionCall(g_hClientBossBehaviour[client], "BFF_EquipBoss", _, client);
+	Gamma_SimpleBehaviourFunctionCall(g_hClientBossBehaviour[client], "BFF_OnEquipBoss", _, client);
 }
 
 // Triggers the Hud timer for a client
@@ -1016,34 +1154,69 @@ stock UpdateHud(client)
 	TriggerTimer(g_hBossHudUpdateTimer[client], true);
 }
 
-// A little helper stock to get charge percentage
+// Adjusts a percentage from 0..1 to 0..100 with the accuracy defined at the top of the file
+stock AdjustFloatPercent(Float:percent)
+{
+	return RoundToFloor((RoundToFloor((percent * (1 / HUD_PERCENTAGE_ACCURACY_FLOAT))) * HUD_PERCENTAGE_ACCURACY_FLOAT) * 100);
+}
+
+// A "little" helper stock to get charge percentage, this is both for cooldown and charging
 stock Float:GetChargePercent(client)
 {
-	// If we aren't charging it can be counted as charged
-	if (g_eBossChargeAbilityState[client] != AbilityState_Charging)
+	// Different ways to handle charge percent depending on ability state and mode
+	switch (g_eBossChargeAbilityState[client])
 	{
-		return 0.0;
+		case AbilityState_Ready:
+		{
+			// When ready, Continuous mode has 100% charge and normal has 0% charge
+			// Normal charges up from 0% to 100% when activating, while continuous uses up charge from 100% to 0% when activating
+			if (g_eBossChargeAbilityMode[client] == ChargeMode_Continuous)
+			{
+				return 1.0;
+			}
+			return 0.0;
+		}
+		case AbilityState_Charging:
+		{
+			// Get percent of the time passed since activation
+			new Float:chargePercent = GetTimePassedPercent(g_fBossChargeActivationTime[client], g_fBossChargeTime[client]);
+			if (g_eBossChargeAbilityMode[client] == ChargeMode_Continuous)
+			{
+				// In continuous mode, it starts from 1 and degrades to 0 instead of the other way around
+				chargePercent = 1 - chargePercent;
+			}
+			return chargePercent;
+		}
+		case AbilityState_OnCooldown:
+		{
+			// Get percent of the time passed since activation of cooldown
+			return GetTimePassedPercent(g_fBossChargeCooldownActivationTime[client], g_fBossChargeCooldownTime[client]);
+		}
 	}
+	// No charge ability, 0% charge, rawr!
+	return 0.0;
+}
 
-	// Get max charge, if it's 0 we could get a division by zero, we don't want that
-	// So, it we're charging and the charge time is 0, then it's already 100%
-	new Float:maxChargeTime = g_fBossMaxChargeTime[client];
-	if (maxChargeTime == 0)
+// Get the percent of time passed since an activation time
+stock Float:GetTimePassedPercent(Float:activationTime, Float:targetDuration)
+{
+	// If the target duration is 0 we'd get a division by 0, we don't want that
+	// So, if the target duration is 0 it's already 100%
+	if (targetDuration == 0)
 	{
 		return 1.0;
 	}
 
-	// g_fBossChargeTime is the time the client started charging the ability
-	new Float:chargeStartTime = g_fBossChargeTime[client];
-	if (chargeStartTime < (GetGameTime() - maxChargeTime))
+	// If the activation time is lower than the (current time - target duration), it's 100% as well
+	if (activationTime < (GetGameTime() - targetDuration))
 	{
-		// if the start time is lower than gametime - maxchargetime then we're fully charged
 		return 1.0;
 	}
 
-	// Subtract chargeStartTime from the current gametime to get time spent charging
-	// then divide by maxcharge to get %
-	return (GetGameTime() - chargeStartTime) / maxChargeTime;
+	// Subtract activation time from the current gametime to get time spent charging
+	// then divide by target duration to get the time passed percent
+	return (GetGameTime() - activationTime) / targetDuration;
+
 }
 
 // Gets percent cooldown for the taunt ability
@@ -1055,6 +1228,11 @@ stock Float:GetTauntCooldownPercent(client)
 	if (g_eRoundState == RoundState_Preround)
 	{
 		return percent;
+	}
+
+	if (g_eBossTauntAbilityState[client] == AbilityState_Ready)
+	{
+		return 1.0;
 	}
 
 	new CooldownMethod:cooldownMethod = g_eBossTauntCooldownMethod[client];
@@ -1069,10 +1247,10 @@ stock Float:GetTauntCooldownPercent(client)
 	if ((cooldownMethod & CooldownMethod_Timed) == CooldownMethod_Timed)
 	{
 		// If the cooldown method includes time, then get the time passed and divide by cooldown time and add to percent
-		new Float:activationtime = g_fBossTauntCooldownActivationTime[client];
+		new Float:activationTime = g_fBossTauntCooldownActivationTime[client];
 		new Float:cooldownTime = g_fBossTauntCooldownTime[client];
 
-		percent += ((GetGameTime() - activationtime) / cooldownTime);
+		percent += ((GetGameTime() - activationTime) / cooldownTime);
 	}
 
 	// It would be stupid if the percentage got over 100%
