@@ -141,20 +141,22 @@ forward Float:BFF_GetChargeTimeRequest();
  *	Must be implemented if the boss uses the Continuous charge mode!
  *
  *	@param client			Client who attempts to start using the ability
- *	@param cooldownPercent	Cooldown percent between 0 and 1, will always be 1 for ChargeMode_Normal 
+ *	@param cooldown			Cooldown percent between 0 and 1, will always be 1 for ChargeMode_Normal 
+ *	@param deltaCooldown	Cooldown delta percent between 0 and 1, delta percent since cooldown started (always (1-(charge from OnChargeAbilityUsed)) for ChargeMode_Normal)
  *	@return					True if the boss can start charging, false otherwise
  */
-forward bool:BFF_OnChargeAbilityStart(client, Float:cooldownPercent);
+forward bool:BFF_OnChargeAbilityStart(client, Float:cooldown, Float:deltaCooldown);
 
 /**
  *	This is optional, called when the boss uses the charge ability
  *	If it's implemented, so must BFF_GetChargeTimeRequest and BFF_FormatChargeAbilityMessageRequest be
  *
- *	@param client	Client who used the ability
- *	@param charge	Charge percent between 0 and 1
- *	@return			Cooldown time in seconds if over 0, else no cooldown - in continuous mode, it's the time to get to 100% cooled down
+ *	@param client		Client who used the ability
+ *	@param charge		Charge percent between 0 and 1
+ *	@param deltaCharge	Charge delta percent between 0 and 1, delta percent since cooldown started (the same as charge for ChargeMode_Normal)
+ *	@return				Cooldown time in seconds if over 0, else no cooldown - in continuous mode, it's the time to get to 100% cooled down
  */
-forward Float:BFF_OnChargeAbilityUsed(client, Float:charge);
+forward Float:BFF_OnChargeAbilityUsed(client, Float:charge, Float:deltaCharge);
 
 /**
  *	Called when Boss Fight Fortress wants to update the hud message, if the boss has a charge ability

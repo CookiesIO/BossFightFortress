@@ -66,7 +66,7 @@ new Float:g_fBossChargeTime[MAXPLAYERS+1];
 new Float:g_fBossChargeCooldownActivationTime[MAXPLAYERS+1];
 new Float:g_fBossChargeCooldownTime[MAXPLAYERS+1];
 
-new Float:g_fCooldownPercentAtActivation[MAXPLAYERS+1];
+new Float:g_fChargePercentAtActivation[MAXPLAYERS+1];
 
 new AbilityState:g_eBossChargeAbilityState[MAXPLAYERS+1];
 new ChargeMode:g_eBossChargeAbilityMode[MAXPLAYERS+1];
@@ -183,6 +183,21 @@ public Gamma_OnGameModeStart()
 	// Set round state
 	g_eRoundState = RoundState_Preround;
 
+	// We use the following events to determine when to do certain things to the boss (rawrrr)
+	HookEvent("arena_round_start", Event_ArenaRoundStart);
+	HookEvent("post_inventory_application", Event_PostInventoryApplication);
+	HookEvent("teamplay_round_win", Event_RoundWin);
+	HookEvent("player_hurt", Event_PlayerHurt);
+	HookEvent("player_changeclass", Event_PlayerChangeClass);
+	HookEvent("player_spawn", Event_PlayerSpawn);
+
+	// And the following commands to block stuff!
+	AddCommandListener(Command_ChangeClass, "join_class");
+	AddCommandListener(Command_ChangeClass, "joinclass");
+	AddCommandListener(Command_JoinTeam, "jointeam");
+	AddCommandListener(Command_Taunt, "+taunt");
+	AddCommandListener(Command_Taunt, "taunt");
+
 	// Get our next boss! And give him a random boss as well
 	new client = GetNextInQueue();
 	g_iCurrentBoss = client;
@@ -193,6 +208,7 @@ public Gamma_OnGameModeStart()
 		// Shift all players to correct teams
 		if (IsClientInGame(i))
 		{
+			SetEntProp(i, Prop_Send, "m_lifeState", 2); // dead
 			if (g_bClientIsBoss[i])
 			{
 				ChangeClientTeam(i, _:TFTeam_Blue);
@@ -201,22 +217,10 @@ public Gamma_OnGameModeStart()
 			{
 				ChangeClientTeam(i, _:TFTeam_Red);
 			}
+			SetEntProp(i, Prop_Send, "m_lifeState", 0); // alive and well
+			TF2_RespawnPlayer(i); // respawn, to return to the correct spawn room
 		}
 	}
-
-	// We use the following events to determine when to do certain things to the boss (rawrrr)
-	HookEvent("arena_round_start", Event_ArenaRoundStart);
-	HookEvent("post_inventory_application", Event_PostInventoryApplication);
-	HookEvent("teamplay_round_win", Event_RoundWin);
-	HookEvent("player_hurt", Event_PlayerHurt);
-	HookEvent("player_changeclass", Event_PlayerChangeClass);
-	HookEvent("player_spawn", Event_PlayerSpawn);
-
-	AddCommandListener(Command_ChangeClass, "join_class");
-	AddCommandListener(Command_ChangeClass, "joinclass");
-	AddCommandListener(Command_JoinTeam, "jointeam");
-	AddCommandListener(Command_Taunt, "+taunt");
-	AddCommandListener(Command_Taunt, "taunt");
 }
 
 public Gamma_OnGameModeEnd(GameModeEndReason:reason)
@@ -325,6 +329,16 @@ public Event_PostInventoryApplication(Handle:event, const String:name[], bool:do
 {
 	new client = GetClientOfUserId(GetEventInt(event, "userid"));
 	if (g_bClientIsBoss[client])
+	{
+		// For almost ALL weapons it would've been fine to just call EquipBoss here, but the sapper - nooooo, delay it abit then it's kay
+		CreateTimer(0.0, DelayedEquipBossTimer, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	}
+}
+
+public Action:DelayedEquipBossTimer(Handle:timer, any:userid)
+{
+	new client = GetClientOfUserId(userid);
+	if (client != 0)
 	{
 		EquipBoss(client);
 	}
@@ -540,6 +554,12 @@ public Gamma_OnBehaviourPossessedClient(client, Behaviour:behaviour)
 	// Only do stuff if it's one of our behaviours!
 	if (Gamma_GetBehaviourType(behaviour) == g_hBossBehaviourType)
 	{
+		// Take the boss away from the client, just incase he already has one
+		if (g_hClientBossBehaviour[client] != INVALID_BEHAVIOUR)
+		{
+			Gamma_TakeBehaviour(client, g_hClientBossBehaviour[client]);
+		}
+
 		// Set the boss' behaviour and other variables, heh
 		g_hClientBossBehaviour[client] = behaviour;
 		g_bClientIsBoss[client] = true;
@@ -592,7 +612,7 @@ stock RetrieveChargeAbility(client, Behaviour:behaviour)
 		if (Gamma_BehaviourHasFunction(behaviour, "BFF_OnChargeAbilityStart"))
 		{
 			// Optional optin to listen when the charge starts (and possibly block)
-			g_hPrivate_OnChargeAbilityStart[client] = CreateForward(ET_Single, Param_Cell, Param_Float);
+			g_hPrivate_OnChargeAbilityStart[client] = CreateForward(ET_Single, Param_Cell, Param_Float, Param_Float);
 			Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_OnChargeAbilityStart", g_hPrivate_OnChargeAbilityStart[client]);
 		}
 		// We must have BFF_OnChargeAbilityStart implemented for continuous mode
@@ -613,7 +633,7 @@ stock RetrieveChargeAbility(client, Behaviour:behaviour)
 		g_fBossChargeTime[client] = chargeTime;
 
 		// Get the taunt ability used function
-		g_hPrivate_OnChargeAbilityUsed[client] = CreateForward(ET_Single, Param_Cell, Param_Float);
+		g_hPrivate_OnChargeAbilityUsed[client] = CreateForward(ET_Single, Param_Cell, Param_Float, Param_Float);
 		Gamma_AddBehaviourFunctionToForward(behaviour, "BFF_OnChargeAbilityUsed", g_hPrivate_OnChargeAbilityUsed[client]);
 
 		// Get the charge ability message formatter function
@@ -836,9 +856,6 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 	// Store whether or not IN_ATTACK2 was released since charging started (used for continuous abilities)
 	static bool:releasedInAttack2SinceChargeStart[MAXPLAYERS+1] = { true, ... };
 
-	// And we wanna know the last (ceiled) charge cooldown time, again so we can update the Hud
-	static lastCeiledChargeCooldownTimeLeft[MAXPLAYERS+1];
-
 	// We also wanna know the last charge percent, so we know when to update the Hud
 	static lastChargePercent[MAXPLAYERS+1];
 
@@ -847,13 +864,11 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 	{
 		// Update hud if cooldown percent has passed 5, 10, ... 95, 100%
 		new lChargePercent = lastChargePercent[client];
-		new cChargePercent = RoundToFloor(GetChargePercent(client) * 100);
+		new cChargePercent = AdjustFloatPercent(GetChargePercent(client), false);
 		new chargeDifference = cChargePercent - lChargePercent;
-		if (chargeDifference >= HUD_PERCENTAGE_ACCURACY)
-		{
-			// Update last charge percent, in case of fast charge times, update correctly accordingly
-			lastChargePercent[client] += (chargeDifference - (chargeDifference % HUD_PERCENTAGE_ACCURACY));
 
+		if (chargeDifference > 0)
+		{
 			// Check if fully cooled down
 			if (cChargePercent == 100)
 			{
@@ -862,6 +877,8 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 			}
 
 			UpdateHud(client);
+
+			lastChargePercent[client] = cChargePercent;
 		}
 
 		// There's no need for us to get the client buttons when we're on cooldown (with ChargeMode_Normal)
@@ -892,6 +909,7 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 						Call_StartForward(g_hPrivate_OnChargeAbilityStart[client]);
 						Call_PushCell(client);
 						Call_PushFloat(cooldownPercent);
+						Call_PushFloat(cooldownPercent - g_fChargePercentAtActivation[client]);
 						Call_Finish(result);
 
 						// Okay, it doesn't want to start charging, too bad
@@ -902,14 +920,14 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 					}
 
 					// Set the charge time slightly back, depending on the cooldownPercent, so it starts at the right %
-					g_fCooldownPercentAtActivation[client] = cooldownPercent;
+					g_fChargePercentAtActivation[client] = cooldownPercent;
 					g_fBossChargeActivationTime[client] = (GetGameTime() - (g_fBossChargeTime[client] * (1 - cooldownPercent))); 
 					g_eBossChargeAbilityState[client] = AbilityState_Charging;
 
 					// For the continuous mode, 0 just ain't working for lastChargePercent, set it to 100, yup
 					if (g_eBossChargeAbilityMode[client] == ChargeMode_Continuous)
 					{
-						lastChargePercent[client] = 100;
+						lastChargePercent[client] = 105;
 					}
 					else
 					{
@@ -927,7 +945,7 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 			{
 				// Update hud if charge percent has passed 5, 10, ... 95, 100%
 				new lChargePercent = lastChargePercent[client];
-				new cChargePercent = AdjustFloatPercent(GetChargePercent(client));
+				new cChargePercent = AdjustFloatPercent(GetChargePercent(client), true);
 				new chargeDifference = cChargePercent - lChargePercent;
 
 				// We have 2 charge modes that act differently in this manner
@@ -945,8 +963,7 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 						if (cChargePercent == 0)
 						{
 							// Activate charge ability, as we've hit 0% charge using continuous mode
-							new Float:cooldownTime = ClientUsedChargeAbility(client);
-							lastCeiledChargeCooldownTimeLeft[client] = RoundToCeil(cooldownTime);
+							ClientUsedChargeAbility(client);
 						}
 
 						UpdateHud(client);
@@ -961,8 +978,7 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 		if (g_eBossChargeAbilityState[client] == AbilityState_Charging)
 		{
 			// Activate charge ability
-			new Float:cooldownTime = ClientUsedChargeAbility(client);
-			lastCeiledChargeCooldownTimeLeft[client] = RoundToCeil(cooldownTime);
+			ClientUsedChargeAbility(client);
 
 			// Reset charge last charge percent, so it's ready for cooldown!
 			lastChargePercent[client] = 0;
@@ -984,6 +1000,7 @@ stock Float:ClientUsedChargeAbility(client)
 	Call_StartForward(g_hPrivate_OnChargeAbilityUsed[client]);
 	Call_PushCell(client);
 	Call_PushFloat(chargePercent);
+	Call_PushFloat(FloatAbs(g_fChargePercentAtActivation[client] - chargePercent));
 	Call_Finish(cooldownTime);
 	
 	if (cooldownTime <= 0.0)
@@ -996,7 +1013,7 @@ stock Float:ClientUsedChargeAbility(client)
 		// Set cooldown time
 		if (g_eBossChargeAbilityMode[client] == ChargeMode_Continuous)
 		{
-			g_fBossChargeCooldownActivationTime[client] = (GetGameTime() - (cooldownTime * (chargePercent)));
+			g_fBossChargeCooldownActivationTime[client] = (GetGameTime() - (cooldownTime * chargePercent));
 		}
 		else
 		{
@@ -1006,6 +1023,7 @@ stock Float:ClientUsedChargeAbility(client)
 		g_fBossChargeCooldownTime[client] = cooldownTime;
 		g_eBossChargeAbilityState[client] = AbilityState_OnCooldown;
 	}
+	g_fChargePercentAtActivation[client] = chargePercent;
 	return cooldownTime;
 }
 
@@ -1021,14 +1039,12 @@ public Action:Internal_OnTakeDamage(victim, &attacker, &inflictor, &Float:damage
 {
 	if (damagecustom == TF_CUSTOM_BACKSTAB)
 	{
-		PrintToServer("backstabs");
 		damagetype |= DMG_CRIT;
-		damage = Pow(float(g_iBossMaxHealth[victim]), 0.65);
+		damage = Pow(float(g_iBossMaxHealth[victim]), 0.60);
 		return Plugin_Changed;
 	}
 	if ((damagetype & DMG_FALL) == DMG_FALL)
 	{
-		PrintToServer("fall ouch");
 		damage = Pow(float(g_iBossMaxHealth[victim]), 0.60);
 		return Plugin_Changed;
 	}
@@ -1155,8 +1171,12 @@ stock UpdateHud(client)
 }
 
 // Adjusts a percentage from 0..1 to 0..100 with the accuracy defined at the top of the file
-stock AdjustFloatPercent(Float:percent)
+stock AdjustFloatPercent(Float:percent, bool:toCeil = false)
 {
+	if (toCeil)
+	{
+		return RoundToCeil((RoundToCeil((percent * (1 / HUD_PERCENTAGE_ACCURACY_FLOAT))) * HUD_PERCENTAGE_ACCURACY_FLOAT) * 100);
+	}
 	return RoundToFloor((RoundToFloor((percent * (1 / HUD_PERCENTAGE_ACCURACY_FLOAT))) * HUD_PERCENTAGE_ACCURACY_FLOAT) * 100);
 }
 

@@ -24,8 +24,8 @@
 // Storage variable for our little sorcerer
 new Behaviour:g_hSorcererBoss = INVALID_BEHAVIOUR;
 
-// Handles for continuous updates while the charge ability is active
-new Handle:g_hContinuousAbilityUpdateTimers[MAXPLAYERS+1];
+// Booleans to store if our bosses are using the continuous ability
+new bool:g_bUsingContinuousAbility[MAXPLAYERS+1];
 
 public Gamma_OnGameModeCreated(GameMode:gameMode)
 {
@@ -43,10 +43,9 @@ public Gamma_OnBehaviourPossessingClient(client)
 
 public Gamma_OnBehaviourReleasingClient(client, BehaviourReleaseReason:reason)
 {
-	if (g_hContinuousAbilityUpdateTimers[client] != INVALID_HANDLE)
+	if (g_bUsingContinuousAbility[client])
 	{
-		CloseHandle(g_hContinuousAbilityUpdateTimers[client]);
-		g_hContinuousAbilityUpdateTimers[client] = INVALID_HANDLE;
+		g_bUsingContinuousAbility[client] = false;
 	}
 }
 
@@ -142,38 +141,46 @@ public ChargeMode:BFF_GetChargeModeRequest()
 
 public Float:BFF_GetChargeTimeRequest()
 {
-	return 10.0;
+	return 20.0;
 }
 
-public bool:BFF_OnChargeAbilityStart(client, Float:cooldown)
+public bool:BFF_OnChargeAbilityStart(client, Float:cooldown, Float:deltaCooldown)
 {
-	TF2_AddCondition(client, TFCond_Cloaked);
-	TF2_AddCondition(client, TFCond_SpeedBuffAlly);
+	if (cooldown == 1.0 || (cooldown >= 0.30 && deltaCooldown >= 0.10))
+	{
+		TF2_AddCondition(client, TFCond_Stealthed);
+		TF2_AddCondition(client, TFCond_SpeedBuffAlly);
 
-	// Woop woop instant cloak!
-	SetEntPropFloat(client, Prop_Send, "m_flInvisChangeCompleteTime", GetGameTime());
+		// Complete cloak change time roughly 0.7 seconds from now
+		SetEntPropFloat(client, Prop_Send, "m_flInvisChangeCompleteTime", GetGameTime() + 0.7);
 
-	g_hContinuousAbilityUpdateTimers[client] = CreateTimer(0.1, ContinuousAbilityUpdateTimer, client, TIMER_REPEAT);
-	return true;
+		CreateTimer(0.1, ContinuousAbilityUpdateTimer, client, TIMER_REPEAT);
+		g_bUsingContinuousAbility[client] = true;
+		return true;
+	}
+	return false;
 }
 
-public Float:BFF_OnChargeAbilityUsed(client, Float:charge)
+public Float:BFF_OnChargeAbilityUsed(client, Float:charge, Float:deltaCharge)
 {
-	CloseHandle(g_hContinuousAbilityUpdateTimers[client]);
-	g_hContinuousAbilityUpdateTimers[client] = INVALID_HANDLE;
+	g_bUsingContinuousAbility[client] = false;
 
-	TF2_RemoveCondition(client, TFCond_Cloaked);
+	TF2_RemoveCondition(client, TFCond_Stealthed);
 	TF2_RemoveCondition(client, TFCond_SpeedBuffAlly);
 
-	// Woop woop instant uncloak!
-	SetEntPropFloat(client, Prop_Send, "m_flInvisChangeCompleteTime", GetGameTime());
-	return 10.0;
+	// Complete cloak change time roughly 0.7 seconds from now
+	SetEntPropFloat(client, Prop_Send, "m_flInvisChangeCompleteTime", GetGameTime() + 0.7);
+	return 30.0;
 }
 
 public Action:ContinuousAbilityUpdateTimer(Handle:timer, any:client)
 {
-	SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", 520.0);
-	SetEntPropFloat(client, Prop_Send, "m_flCloakMeter", 100.0);
+	if (g_bUsingContinuousAbility[client])
+	{
+		SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", 520.0);
+		return Plugin_Continue;
+	}
+	return Plugin_Stop;
 }
 
 public BFF_FormatBossNameMessageRequest(String:message[], maxlength, client)
@@ -202,7 +209,23 @@ public BFF_FormatChargeAbilityMessageRequest(String:message[], maxlength, client
 	{
 		case AbilityState_Ready, AbilityState_Charging, AbilityState_OnCooldown:
 		{
-			Format(message, maxlength, "Continuous ability %d%% charged", percent);
+			Format(message, maxlength, "Faster-Than-Light'o'Meter %d%% FTL-Charge", percent);
 		}
+	}
+}
+
+public TF2_OnConditionAdded(client, TFCond:condition)
+{
+	if (g_bUsingContinuousAbility[client] && condition == TFCond_StealthedUserBuffFade)
+	{
+		TF2_RemoveCondition(client, TFCond_StealthedUserBuffFade);
+	}
+}
+
+public TF2_OnConditionRemoved(client, TFCond:condition)
+{
+	if (g_bUsingContinuousAbility[client] && condition == TFCond_Stealthed)
+	{
+		TF2_AddCondition(client, TFCond_Stealthed);
 	}
 }
