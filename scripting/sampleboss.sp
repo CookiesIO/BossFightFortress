@@ -34,40 +34,44 @@ public Gamma_OnGameModeCreated(GameMode:gameMode)
 	}
 }
 
-public BFF_GetMaxHealth(Float:multiplier)
+public BFF_GetMaxHealthRequest(Float:multiplier)
 {
 	return RoundToFloor(Pow(512.0 * multiplier, 1.1));
 }
 
-public BFF_EquipBoss(boss)
+public BFF_OnEquipBoss(boss)
 {
 }
 
-public BFF_GetInitialTauntAbilityCooldown(&damageCooldown, &Float:timedCooldown)
+public BFF_GetInitialTauntAbilityCooldownRequest(&damageCooldown, &Float:timedCooldown)
 {
 	damageCooldown = 400;
 	timedCooldown = 60.0;
 }
 
-public bool:BFF_TauntAbilityUsed(client, &damageCooldown, &Float:timedCooldown)
+public bool:BFF_OnTauntAbilityUsed(client, Float:rechargePercent, &damageCooldown, &Float:timedCooldown)
 {
-	damageCooldown = 100;
-	timedCooldown = 15.0;
+	if (rechargePercent == 1.0)
+	{
+		damageCooldown = 100;
+		timedCooldown = 15.0;
 
-	TF2_AddCondition(client, TFCond_Ubercharged, 10.0);
-	TF2_AddCondition(client, TFCond_CritOnFirstBlood, 10.0);
+		TF2_AddCondition(client, TFCond_Ubercharged, 10.0);
+		TF2_AddCondition(client, TFCond_CritOnFirstBlood, 10.0);
 
-	SlapPlayer(client, 0, false);
-	return true;
+		SlapPlayer(client, 0, false);
+		return true;
+	}
+	return false;
 }
 
 
-public Float:BFF_GetChargeTime()
+public Float:BFF_GetChargeTimeRequest()
 {
 	return 2.0;
 }
 
-public Float:BFF_ChargeAbilityUsed(boss, Float:charge)
+public Float:BFF_OnChargeAbilityUsed(boss, Float:charge, Float:deltaCharge)
 {
 	// Do nothing with less than 15% charge
 	if (charge < 0.15)
@@ -96,19 +100,19 @@ public Float:BFF_ChargeAbilityUsed(boss, Float:charge)
 	return 0.0;
 }
 
-public BFF_FormatBossNameMessage(String:message[], maxlength, client)
+public BFF_FormatBossNameMessageRequest(String:message[], maxlength, client)
 {
 	Format(message, maxlength, "Sample Boss");
 }
 
 
-public BFF_FormatTauntAbilityMessage(String:message[], maxlength, client, AbilityState:tauntAbilityState, Float:tauntCooldownPercent)
+public BFF_FormatTauntAbilityMessageRequest(String:message[], maxlength, client, AbilityState:tauntAbilityState, percent)
 {	
 	switch (tauntAbilityState)
 	{
 		case AbilityState_OnCooldown:
 		{
-			Format(message, maxlength, "Hiccup %d%% recharged", RoundToFloor(tauntCooldownPercent * 100));
+			Format(message, maxlength, "Hiccup %d%% recharged", percent);
 		}
 		case AbilityState_Ready:
 		{
@@ -118,7 +122,7 @@ public BFF_FormatTauntAbilityMessage(String:message[], maxlength, client, Abilit
 }
 
 
-public BFF_FormatChargeAbilityMessage(String:message[], maxlength, client, AbilityState:chargeAbilityState, Float:chargeOrCooldown)
+public BFF_FormatChargeAbilityMessageRequest(String:message[], maxlength, client, AbilityState:chargeAbilityState, percent)
 {
 	switch (chargeAbilityState)
 	{
@@ -128,19 +132,11 @@ public BFF_FormatChargeAbilityMessage(String:message[], maxlength, client, Abili
 		}
 		case AbilityState_Charging:
 		{
-			Format(message, maxlength, "Lame jump %d%% charged", RoundToFloor(chargeOrCooldown * 100));
+			Format(message, maxlength, "Lame jump %d%% charged", percent);
 		}
 		case AbilityState_OnCooldown:
 		{
-			new secondsLeft = RoundToFloor(chargeOrCooldown);
-			if (secondsLeft == 1)
-			{
-				Format(message, maxlength, "Lame jump ready in 1 second");
-			}
-			else
-			{
-				Format(message, maxlength, "Lame jump ready in %d seconds", secondsLeft);
-			}
+			Format(message, maxlength, "Lame jump %d%% recharged", percent);
 		}
 	}
 }

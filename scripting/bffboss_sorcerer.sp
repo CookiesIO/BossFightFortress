@@ -25,7 +25,7 @@
 new Behaviour:g_hSorcererBoss = INVALID_BEHAVIOUR;
 
 // Booleans to store if our bosses are using the continuous ability
-new bool:g_bUsingContinuousAbility[MAXPLAYERS+1];
+new bool:g_bUsingFasterThanLight[MAXPLAYERS+1];
 
 public Gamma_OnGameModeCreated(GameMode:gameMode)
 {
@@ -43,9 +43,9 @@ public Gamma_OnBehaviourPossessingClient(client)
 
 public Gamma_OnBehaviourReleasingClient(client, BehaviourReleaseReason:reason)
 {
-	if (g_bUsingContinuousAbility[client])
+	if (g_bUsingFasterThanLight[client])
 	{
-		g_bUsingContinuousAbility[client] = false;
+		g_bUsingFasterThanLight[client] = false;
 	}
 }
 
@@ -62,52 +62,82 @@ public BFF_OnEquipBoss(client)
 
 public BFF_GetInitialTauntAbilityCooldownRequest(&damageCooldown, &Float:timedCooldown)
 {
-	damageCooldown = 50;
-	timedCooldown = 10.0;
+	//damageCooldown = 50;
+	timedCooldown = 30.0;
 }
 
 public bool:BFF_OnTauntAbilityUsed(client, Float:rechargePercent, &damageCooldown, &Float:timedCooldown)
 {
-	if (rechargePercent != 1.0)
+	new bool:result = false;
+	if (rechargePercent >= 1.0)
 	{
-		return false;
-	}
-
-	if (NavMesh_Exists())
-	{
-		new playerCount = GetAlivePlayerCount();
-		new zombieCount = playerCount * 2;
-
-		new Handle:areas = NavMesh_GetAreas();
-		new areaCount = GetArraySize(areas);
-		new Float:areaCenter[3];
-
-		for (new i = 0; i < zombieCount; i++)
+		if (NavMesh_Exists())
 		{
-			new randomArea = GetRandomInt(0, areaCount - 1);
-			NavMeshArea_GetCenter(randomArea, areaCenter);
-			SpawnTFZombie(client, areaCenter);
-		}
-	}
-	else
-	{
-		// Meh, no navmesh, just spawn directly under the player, we should have navmeshes, so why dont we!?
-		// Should probably replace this with an ability not involving bots
-		for (new i = 1; i < MaxClients; i++)
-		{
-			if (IsClientInGame(i))
-			{
-				new Float:pos[3];
-				GetClientAbsOrigin(i, pos);
-				for (new j = 0; j < 3; j++)
+			new playerCount = GetAlivePlayerCount();
+			new eyeballBossCount = RoundToCeil(playerCount / 2.0);
+
+			new Handle:areas = NavMesh_GetAreas();
+			new areaCount = GetArraySize(areas);
+			new Float:areaCenter[3];
+
+			for (new i = 0; i < eyeballBossCount; i++)
+			{	
+				new randomArea = GetRandomInt(0, areaCount - 1);
+				NavMeshArea_GetCenter(randomArea, areaCenter);
+				areaCenter[2] += 80.0;
+
+				TR_TraceHull(areaCenter, areaCenter, Float:{-30.0, -30.0, -30.0}, Float:{30.0, 30.0, 30.0}, MASK_PLAYERSOLID_BRUSHONLY);
+				if (!TR_DidHit())
 				{
-					SpawnTFZombie(client, pos);
+					SpawnEyeballBoss(client, areaCenter);
+				}
+				else
+				{
+					i--; // We were blocked, try again
 				}
 			}
 		}
+		result = true;
 	}
-	timedCooldown = 10.0;
-	return true;
+	if (rechargePercent >= 0.5)
+	{
+		if (NavMesh_Exists())
+		{
+			new playerCount = GetAlivePlayerCount();
+			new zombieCount = playerCount * 2;
+
+			new Handle:areas = NavMesh_GetAreas();
+			new areaCount = GetArraySize(areas);
+			new Float:areaCenter[3];
+
+			for (new i = 0; i < zombieCount; i++)
+			{
+				new randomArea = GetRandomInt(0, areaCount - 1);
+				NavMeshArea_GetCenter(randomArea, areaCenter);
+				SpawnTFZombie(client, areaCenter);
+			}
+		}
+		else
+		{
+			// Meh, no navmesh, just spawn directly under the player, we should have navmeshes, so why dont we!?
+			// Should probably replace this with an ability not involving bots
+			for (new i = 1; i < MaxClients; i++)
+			{
+				if (IsClientInGame(i))
+				{
+					new Float:pos[3];
+					GetClientAbsOrigin(i, pos);
+					for (new j = 0; j < 3; j++)
+					{
+						SpawnTFZombie(client, pos);
+					}
+				}
+			}
+		}
+		result = true;
+	}
+	timedCooldown = 30.0;
+	return result;
 }
 
 stock GetAlivePlayerCount()
@@ -134,6 +164,17 @@ stock SpawnTFZombie(owner, const Float:pos[3])
 	TeleportEntity(zombie, pos, NULL_VECTOR, NULL_VECTOR);
 }
 
+stock SpawnEyeballBoss(owner, const Float:pos[3])
+{
+	new eyeball_boss = CreateEntityByName("eyeball_boss");
+
+	SetEntPropEnt(eyeball_boss, Prop_Data, "m_hOwnerEntity", owner);
+	SetEntProp(eyeball_boss, Prop_Data, "m_iTeamNum", GetClientTeam(owner));
+
+	DispatchSpawn(eyeball_boss);
+	TeleportEntity(eyeball_boss, pos, NULL_VECTOR, NULL_VECTOR);
+}
+
 public ChargeMode:BFF_GetChargeModeRequest()
 {
 	return ChargeMode_Continuous;
@@ -155,7 +196,7 @@ public bool:BFF_OnChargeAbilityStart(client, Float:cooldown, Float:deltaCooldown
 		SetEntPropFloat(client, Prop_Send, "m_flInvisChangeCompleteTime", GetGameTime() + 0.7);
 
 		CreateTimer(0.1, ContinuousAbilityUpdateTimer, client, TIMER_REPEAT);
-		g_bUsingContinuousAbility[client] = true;
+		g_bUsingFasterThanLight[client] = true;
 		return true;
 	}
 	return false;
@@ -163,7 +204,7 @@ public bool:BFF_OnChargeAbilityStart(client, Float:cooldown, Float:deltaCooldown
 
 public Float:BFF_OnChargeAbilityUsed(client, Float:charge, Float:deltaCharge)
 {
-	g_bUsingContinuousAbility[client] = false;
+	g_bUsingFasterThanLight[client] = false;
 
 	TF2_RemoveCondition(client, TFCond_Stealthed);
 	TF2_RemoveCondition(client, TFCond_SpeedBuffAlly);
@@ -175,7 +216,7 @@ public Float:BFF_OnChargeAbilityUsed(client, Float:charge, Float:deltaCharge)
 
 public Action:ContinuousAbilityUpdateTimer(Handle:timer, any:client)
 {
-	if (g_bUsingContinuousAbility[client])
+	if (g_bUsingFasterThanLight[client])
 	{
 		SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", 520.0);
 		return Plugin_Continue;
@@ -194,11 +235,18 @@ public BFF_FormatTauntAbilityMessageRequest(String:message[], maxlength, client,
 	{
 		case AbilityState_OnCooldown:
 		{
-			Format(message, maxlength, "Skeleton horde %d%% recharged", tauntCooldownPercent);
+			if (tauntCooldownPercent < 50)
+			{
+				Format(message, maxlength, "Skeleton horde %d%% recharged\nMonoculus summon %d%% recharged", (tauntCooldownPercent * 2), tauntCooldownPercent);
+			}
+			else
+			{
+				Format(message, maxlength, "Skeleton horde ready\nMonoculus summon %d%% recharged", tauntCooldownPercent);
+			}
 		}
 		case AbilityState_Ready:
 		{
-			Format(message, maxlength, "Skeleton horde ready");
+			Format(message, maxlength, "Skeleton horde ready\nMonoculus summon ready");
 		}
 	}
 }
@@ -209,14 +257,16 @@ public BFF_FormatChargeAbilityMessageRequest(String:message[], maxlength, client
 	{
 		case AbilityState_Ready, AbilityState_Charging, AbilityState_OnCooldown:
 		{
-			Format(message, maxlength, "Faster-Than-Light'o'Meter %d%% FTL-Charge", percent);
+			Format(message, maxlength, "Faster-Than-Light'o'Meter: %d%% FTL-Charge", percent);
 		}
 	}
 }
 
 public TF2_OnConditionAdded(client, TFCond:condition)
 {
-	if (g_bUsingContinuousAbility[client] && condition == TFCond_StealthedUserBuffFade)
+	// When we attack while in TFCond_Stealthed it will be removed and TFCond_StealthedUserBuffFade will be added
+	// So remove TFCond_StealthedUserBuffFade if we're using FTL and we get it added
+	if (g_bUsingFasterThanLight[client] && condition == TFCond_StealthedUserBuffFade)
 	{
 		TF2_RemoveCondition(client, TFCond_StealthedUserBuffFade);
 	}
@@ -224,7 +274,9 @@ public TF2_OnConditionAdded(client, TFCond:condition)
 
 public TF2_OnConditionRemoved(client, TFCond:condition)
 {
-	if (g_bUsingContinuousAbility[client] && condition == TFCond_Stealthed)
+	// When we attack while in TFCond_Stealthed it will be removed and TFCond_StealthedUserBuffFade will be added
+	// So readd TFCond_Stealthed if we're using FTL and we get it removed
+	if (g_bUsingFasterThanLight[client] && condition == TFCond_Stealthed)
 	{
 		TF2_AddCondition(client, TFCond_Stealthed);
 	}

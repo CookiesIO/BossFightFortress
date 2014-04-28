@@ -22,6 +22,9 @@
 #include <gamma>
 #include <bossfightfortress>
 
+// Uncomment to make Boss Fight Fortress run the game mode as Bosses VS Bosses instead of Boss VS All
+//#define BOSSES_VERSUS_BOSSES
+
 // Taunt ability cooldown method, there's a few options!
 enum CooldownMethod
 {
@@ -169,12 +172,16 @@ public bool:Gamma_IsGameModeAbleToStartRequest()
 		canStart = playerCount >= 2;
 	}
 
+	#if !defined BOSSES_VERSUS_BOSSES
+
 	// We must also be sure we have a client to become the boss
 	if (canStart)
 	{
 		new nextBoss = GetNextInQueue();
 		canStart = nextBoss != -1;
 	}
+
+	#endif
 	return canStart;
 }
 
@@ -190,37 +197,61 @@ public Gamma_OnGameModeStart()
 	HookEvent("player_hurt", Event_PlayerHurt);
 	HookEvent("player_changeclass", Event_PlayerChangeClass);
 	HookEvent("player_spawn", Event_PlayerSpawn);
+	HookEvent("player_death", Event_PlayerDeath);
 
 	// And the following commands to block stuff!
 	AddCommandListener(Command_ChangeClass, "join_class");
 	AddCommandListener(Command_ChangeClass, "joinclass");
-	AddCommandListener(Command_JoinTeam, "jointeam");
 	AddCommandListener(Command_Taunt, "+taunt");
 	AddCommandListener(Command_Taunt, "taunt");
+
+	#if !defined BOSSES_VERSUS_BOSSES
+	AddCommandListener(Command_JoinTeam, "jointeam");
+	#endif
+
+	#if !defined BOSSES_VERSUS_BOSSES
 
 	// Get our next boss! And give him a random boss as well
 	new client = GetNextInQueue();
 	g_iCurrentBoss = client;
 	Gamma_GiveRandomBehaviour(client, g_hBossBehaviourType);
 
+	#endif
+
 	for (new i = 1; i <= MaxClients; i++)
 	{
 		// Shift all players to correct teams
-		if (IsClientInGame(i))
+		if (IsClientInGame(i) && GetClientTeam(i) >= 2)
 		{
-			SetEntProp(i, Prop_Send, "m_lifeState", 2); // dead
+			#if defined BOSSES_VERSUS_BOSSES
+
+			// All people are bosses!
+			Gamma_GiveRandomBehaviour(i, g_hBossBehaviourType);
+
+			#else
+
+			// Not all people are bosses!
 			if (g_bClientIsBoss[i])
 			{
-				ChangeClientTeam(i, _:TFTeam_Blue);
+				DeathlessChangeClientTeam(i, _:TFTeam_Blue);
+				TF2_RespawnPlayer(i); // respawn, to return to the correct spawn room
 			}
 			else if (GetClientTeam(i) == _:TFTeam_Blue)
 			{
-				ChangeClientTeam(i, _:TFTeam_Red);
+				DeathlessChangeClientTeam(i, _:TFTeam_Red);
+				TF2_RespawnPlayer(i); // respawn, to return to the correct spawn room
 			}
-			SetEntProp(i, Prop_Send, "m_lifeState", 0); // alive and well
-			TF2_RespawnPlayer(i); // respawn, to return to the correct spawn room
+
+			#endif
 		}
 	}
+}
+
+stock DeathlessChangeClientTeam(client, team)
+{
+	SetEntProp(client, Prop_Send, "m_lifeState", 2); // dead
+	ChangeClientTeam(client, team);
+	SetEntProp(client, Prop_Send, "m_lifeState", 0); // alive and well
 }
 
 public Gamma_OnGameModeEnd(GameModeEndReason:reason)
@@ -236,13 +267,16 @@ public Gamma_OnGameModeEnd(GameModeEndReason:reason)
 	UnhookEvent("player_hurt", Event_PlayerHurt);
 	UnhookEvent("player_changeclass", Event_PlayerChangeClass);
 	UnhookEvent("player_spawn", Event_PlayerSpawn);
+	UnhookEvent("player_death", Event_PlayerDeath);
 
 	RemoveCommandListener(Command_ChangeClass, "join_class");
 	RemoveCommandListener(Command_ChangeClass, "joinclass");
-	RemoveCommandListener(Command_JoinTeam, "jointeam");
 	RemoveCommandListener(Command_Taunt, "+taunt");
 	RemoveCommandListener(Command_Taunt, "taunt");
 
+	#if !defined BOSSES_VERSUS_BOSSES
+	RemoveCommandListener(Command_JoinTeam, "jointeam");
+	#endif
 }
 
 /*******************************************************************************
@@ -255,14 +289,18 @@ public Event_ArenaRoundStart(Handle:event, const String:name[], bool:dontBroadca
 	// Now we're truly started, so now our RoundState is RoundRunning
 	g_eRoundState = RoundState_RoundRunning;
 
-	new enemyTeamCount = GetTeamPlayerCount(TFTeam_Red);
+	#if defined BOSSES_VERSUS_BOSSES
+	new Float:multiplier = 1.0;
+	#else
+	new Float:multiplier = float(GetTeamPlayerCount(TFTeam_Red));
+	#endif
 
 	for (new i = 1; i <= MaxClients; i++)
 	{
 		// If the client is a boss, get his max health!
 		if (g_bClientIsBoss[i])
 		{
-			new health = Gamma_SimpleBehaviourFunctionCall(g_hClientBossBehaviour[i], "BFF_GetMaxHealthRequest", _, float(enemyTeamCount));
+			new health = Gamma_SimpleBehaviourFunctionCall(g_hClientBossBehaviour[i], "BFF_GetMaxHealthRequest", _, multiplier);
 			g_iBossMaxHealth[i] = health;
 			SetEntProp(i, Prop_Send, "m_iHealth", g_iBossMaxHealth[i]);
 
@@ -322,6 +360,25 @@ public Action:Event_PlayerSpawn(Handle:event, const String:name[], bool:dontBroa
 			BFF_SetPlayerClass(client, g_eClientBossClass[client]);
 		}
 	}
+	#if defined BOSSES_VERSUS_BOSSES
+	else
+	{
+		Gamma_GiveRandomBehaviour(client, g_hBossBehaviourType);
+	}
+	#endif
+}
+
+// Remove the boss on death, no need for the client to still have a boss!
+public Action:Event_PlayerDeath(Handle:event, const String:name[], bool:dontBroadcast)
+{
+	if (g_eRoundState != RoundState_Preround)
+	{
+		new client = GetClientOfUserId(GetEventInt(event, "userid"));
+		if (g_bClientIsBoss[client])
+		{
+			Gamma_TakeBehaviour(client, g_hClientBossBehaviour[client]);
+		}
+	}
 }
 
 // Give the boss(es) the gear they don't deserve!
@@ -338,7 +395,7 @@ public Event_PostInventoryApplication(Handle:event, const String:name[], bool:do
 public Action:DelayedEquipBossTimer(Handle:timer, any:userid)
 {
 	new client = GetClientOfUserId(userid);
-	if (client != 0)
+	if (client && g_bClientIsBoss[client])
 	{
 		EquipBoss(client);
 	}
@@ -446,6 +503,7 @@ public Action:Command_Taunt(client, const String:command[], argc)
 			{
 				cooldownMethod |= CooldownMethod_Damage;
 				g_iBossTauntCooldownDamage[client] = damageCooldown;
+				g_iBossTauntCooldownDamageTaken[client] = 0;
 				tauntAbilityState = AbilityState_OnCooldown;
 			}
 			if (timedCooldown > 0)
@@ -592,7 +650,7 @@ public Gamma_OnBehaviourPossessedClient(client, Behaviour:behaviour)
 public Action:DelayedRegenerationTimer(Handle:timer, any:userid)
 {
 	new client = GetClientOfUserId(userid);
-	if (client)
+	if (client && g_bClientIsBoss[client])
 	{
 		TF2_RegeneratePlayer(client);
 		SetEntProp(client, Prop_Send, "m_iHealth", g_iBossMaxHealth[client]);
@@ -754,6 +812,7 @@ public Gamma_OnBehaviourReleasedClient(client, Behaviour:behaviour, BehaviourRel
 		g_hPrivate_OnChargeAbilityStart[client] = INVALID_HANDLE;
 		g_hPrivate_OnChargeAbilityUsed[client] = INVALID_HANDLE;
 
+		g_iBossTauntCooldownDamageTaken[client] = 0;
 		g_eBossTauntAbilityState[client] = AbilityState_None;
 		g_hPrivate_FormatTauntAbilityMessageRequest[client] = INVALID_HANDLE;
 		g_hPrivate_OnTauntAbilityUsed[client] = INVALID_HANDLE;
@@ -779,6 +838,9 @@ public Gamma_OnBehaviourReleasedClient(client, Behaviour:behaviour, BehaviourRel
 					{
 						// Oh no, no other boss behaviours!
 						Gamma_ForceStopGameMode();
+
+						// Also, clear hud, lingering hud = ugly
+						ClearSyncHud(client, g_hStatusHud);
 						return;
 					}
 
@@ -786,18 +848,23 @@ public Gamma_OnBehaviourReleasedClient(client, Behaviour:behaviour, BehaviourRel
 					Gamma_GiveBehaviour(client, bossBehaviour);
 					TF2_RegeneratePlayer(client);
 				}
+				#if !defined BOSSES_VERSUS_BOSSES
 				else
 				{
 					// Client disconencted, not good, oh well - later we could try finding another for the position here
 					Gamma_ForceStopGameMode();
 					return;
 				}
+				#endif
 			}
 			// Uh-oh, well shit, this ain't good
 			case RoundState_RoundRunning:
 			{
-				// We could make attempts at fixing it up by trying to assign a new boss, but for now force stop
-				Gamma_ForceStopGameMode();
+				if (reason == BehaviourReleaseReason_BehaviourUnloaded)
+				{
+					// We could make attempts at fixing it up by trying to assign a new boss, but for now force stop
+					Gamma_ForceStopGameMode();
+				}
 
 				// Also, clear hud, lingering hud = ugly
 				ClearSyncHud(client, g_hStatusHud);
@@ -1112,7 +1179,6 @@ stock UpdateTauntCooldown(client)
 			// And we're fully recharged!
 			g_eBossTauntCooldownMethod[client] = CooldownMethod_None;
 			g_eBossTauntAbilityState[client] = AbilityState_Ready;
-			g_iBossTauntCooldownDamageTaken[client] = 0;
 			lastCooldownPercent[client] = 0;
 		}
 		else
@@ -1122,6 +1188,11 @@ stock UpdateTauntCooldown(client)
 		}
 
 		UpdateHud(client);
+	}
+	// Ability was activated before fully recharging
+	else if (cooldownDifference < 0)
+	{
+		lastCooldownPercent[client] = 0;
 	}
 }
 
