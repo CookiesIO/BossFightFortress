@@ -101,6 +101,16 @@ new Handle:g_hPrivate_FormatChargeAbilityMessageRequest[MAXPLAYERS+1];
 // Meh, just keeping it for the queue that needs to be remade anyway
 new g_iCurrentBoss;
 
+public APLRes:AskPluginLoad2(Handle:myself, bool:late, String:error[], err_max)
+{
+	CreateNative("BFF_UpdateHud", Native_BFF_UpdateHud);
+	CreateNative("BFF_ResetTauntAbilityCooldown", Native_BFF_ResetTauntAbilityCooldown);
+	CreateNative("BFF_ResetChargeAbilityCooldown", Native_BFF_ResetChargeAbilityCooldown);
+
+	RegPluginLibrary("bossfightfortress");
+	return APLRes_Success;
+}
+
 public OnPluginStart()
 {
 	new Handle:gc = LoadGameConfigFile("bossfightfortress");
@@ -352,20 +362,24 @@ public Action:DelayedRevertBossClassTimer(Handle:timer, any:userid)
 // This is to fix a bug that appeared without my consent!
 public Action:Event_PlayerSpawn(Handle:event, const String:name[], bool:dontBroadcast)
 {
-	new client = GetClientOfUserId(GetEventInt(event, "userid"));
-	if (g_bClientIsBoss[client])
+	// Did you know: When a player connects they "spawn" in team 0? I tell you what, I didn't! (at first)
+	if (GetEventInt(event, "team") >= 2)
 	{
-		if (GetEventInt(event, "class") != _:g_eClientBossClass[client])
+		new client = GetClientOfUserId(GetEventInt(event, "userid"));
+		if (g_bClientIsBoss[client])
 		{
-			BFF_SetPlayerClass(client, g_eClientBossClass[client]);
+			if (GetEventInt(event, "class") != _:g_eClientBossClass[client])
+			{
+				BFF_SetPlayerClass(client, g_eClientBossClass[client]);
+			}
 		}
+		#if defined BOSSES_VERSUS_BOSSES
+		else
+		{
+			Gamma_GiveRandomBehaviour(client, g_hBossBehaviourType);
+		}
+		#endif
 	}
-	#if defined BOSSES_VERSUS_BOSSES
-	else
-	{
-		Gamma_GiveRandomBehaviour(client, g_hBossBehaviourType);
-	}
-	#endif
 }
 
 // Remove the boss on death, no need for the client to still have a boss!
@@ -966,7 +980,16 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 			{
 				if (releasedInAttack2SinceChargeStart[client])
 				{
-					new Float:cooldownPercent = GetChargePercent(client);
+					// Get the cooldownPercent depending on whether we're using Continuous or normal charge mode
+					new Float:cooldownPercent;
+					if (g_eBossChargeAbilityMode[client] == ChargeMode_Continuous)
+					{
+						cooldownPercent = GetChargePercent(client);
+					}
+					else
+					{
+						cooldownPercent = 1.0;
+					}
 
 					// Our start listener, we'll see if we have it
 					if (g_hPrivate_OnChargeAbilityStart[client] != INVALID_HANDLE)
@@ -987,8 +1010,8 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 					}
 
 					// Set the charge time slightly back, depending on the cooldownPercent, so it starts at the right %
-					g_fChargePercentAtActivation[client] = cooldownPercent;
 					g_fBossChargeActivationTime[client] = (GetGameTime() - (g_fBossChargeTime[client] * (1 - cooldownPercent))); 
+					g_fChargePercentAtActivation[client] = cooldownPercent;
 					g_eBossChargeAbilityState[client] = AbilityState_Charging;
 
 					// For the continuous mode, 0 just ain't working for lastChargePercent, set it to 100, yup
@@ -1010,21 +1033,27 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 			}
 			case AbilityState_Charging:
 			{
-				// Update hud if charge percent has passed 5, 10, ... 95, 100%
-				new lChargePercent = lastChargePercent[client];
-				new cChargePercent = AdjustFloatPercent(GetChargePercent(client), true);
-				new chargeDifference = cChargePercent - lChargePercent;
-
 				// We have 2 charge modes that act differently in this manner
 				if (g_eBossChargeAbilityMode[client] == ChargeMode_Normal)
 				{
+					// Update hud if charge percent has passed 5, 10, ... 95, 100%
+					new lChargePercent = lastChargePercent[client];
+					new cChargePercent = AdjustFloatPercent(GetChargePercent(client), false);
+					new chargeDifference = cChargePercent - lChargePercent;
+
 					if (chargeDifference > 0)
 					{
 						UpdateHud(client);
+						lastChargePercent[client] = cChargePercent;
 					}
 				}
 				else
 				{
+					// Update hud if charge percent has passed 5, 10, ... 95, 100%
+					new lChargePercent = lastChargePercent[client];
+					new cChargePercent = AdjustFloatPercent(GetChargePercent(client), true);
+					new chargeDifference = cChargePercent - lChargePercent;
+
 					if (chargeDifference < 0)
 					{
 						if (cChargePercent == 0)
@@ -1034,9 +1063,9 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 						}
 
 						UpdateHud(client);
+						lastChargePercent[client] = cChargePercent;
 					}
 				}
-				lastChargePercent[client] = cChargePercent;
 			}
 		}
 	}
@@ -1358,4 +1387,23 @@ stock GetTeamPlayerCount(TFTeam:team)
 {
 	// Uhhh, yeah, i found this after i wrote the stock, just wrapping it now since the "cast" is ugly
 	return GetTeamClientCount(_:team);
+}
+
+
+
+/*******************************************************************************
+ *	NATIVES
+ *******************************************************************************/
+
+public Native_BFF_UpdateHud(Handle:plugin, numParams)
+{
+
+}
+public Native_BFF_ResetTauntAbilityCooldown(Handle:plugin, numParams)
+{
+
+}
+public Native_BFF_ResetChargeAbilityCooldown(Handle:plugin, numParams)
+{
+
 }

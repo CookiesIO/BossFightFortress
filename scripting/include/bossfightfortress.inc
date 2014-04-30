@@ -47,9 +47,18 @@ enum ChargeMode
  *******************************************************************************/
 
 /**
+ *	Forces BFF to update the boss hud on a client
+ *
+ *	@param client	Client to update the hud on
+ *	@noreturn
+ */
+native BFF_UpdateHud(client);
+
+/**
  *	Called when Boss Fight Fortress wants to know the max health of your boss
  *
  *	@param multiplier	Health multiplier
+ *	@return				Maximum health
  */
 forward BFF_GetMaxHealthRequest(Float:multiplier);
 
@@ -57,6 +66,7 @@ forward BFF_GetMaxHealthRequest(Float:multiplier);
  *	Called when the behaviour should equip the boss with his badass gear and model and whatnot
  *
  *	@param client	The client to give the stuff to
+ *	@noreturn
  */
 forward BFF_OnEquipBoss(client);
 
@@ -64,9 +74,10 @@ forward BFF_OnEquipBoss(client);
  *	Called when Boss Fight Fortress wants to update the hud message
  *	The message should be formatted with the boss name
  *
- *	@param message					Message buffer to store the formatted message in
- *	@param maxlength				Size of the message buffer
- *	@param client					The client whose hud is getting updated
+ *	@param message		Message buffer to store the formatted message in
+ *	@param maxlength	Size of the message buffer
+ *	@param client		The client whose hud is getting updated
+ *	@noreturn
  */
 forward BFF_FormatBossNameMessageRequest(String:message[], maxlength, client);
 
@@ -76,6 +87,16 @@ forward BFF_FormatBossNameMessageRequest(String:message[], maxlength, client);
 /*******************************************************************************
  *	TAUNT ABILITY					
  *******************************************************************************/
+
+/**
+ *	Damage and timed cooldown can be mixed, they speed up each other, it is NOT whichever comes first!
+ *
+ *	@param damageCooldown	Optional: The amount of damage required to 100% charge the taunt ability if higher than 0, not inclusive
+ *	@param timedCooldown	Optional: The amount of time in seconds to 100% charge the taunt ability if higher than 0, not inclusive
+ *	@noreturn
+ *	@error					Taunt ability not implemented, invalid client or boss not active on client
+ */
+native BFF_ResetTauntAbilityCooldown(client, damageCooldown=-1, Float:timedCooldown=-1.0);
 
 /**
  *	This is optional
@@ -111,6 +132,7 @@ forward bool:BFF_OnTauntAbilityUsed(client, Float:rechargePercent, &damageCooldo
  *	@param client					The client whose hud is getting updated
  *	@param tauntAbilityState		Ability state of the taunt ability, can either be AbilityState_None, AbilityState_Ready or AbilityState_OnCooldown
  *	@param tauntCooldownPercent		If taunt ability state is OnCooldown then it's cooldown percent between 0 and 100 inclusive, the higher it is, the closer to AbilityState_Ready
+ *	@noreturn
  */
 forward BFF_FormatTauntAbilityMessageRequest(String:message[], maxlength, client, AbilityState:tauntAbilityState, tauntCooldownPercent);
 
@@ -120,6 +142,16 @@ forward BFF_FormatTauntAbilityMessageRequest(String:message[], maxlength, client
 /*******************************************************************************
  *	CHARGE ABILITY					
  *******************************************************************************/
+
+/**
+ *	Starts cooldown for the clients charge ability, or resets it with the new time
+ *
+ *	@param client			Client to set cooldown on
+ *	@param cooldownTime		Cooldown time in second
+ *	@noreturn
+ *	@error					Charge ability not implemented, invalid client or boss not active on client
+ */
+native BFF_ResetChargeAbilityCooldown(client, Float:cooldownTime);
 
 /**
  *	This is optional, called when BossFightFortress wants to get the charge mode
@@ -168,6 +200,7 @@ forward Float:BFF_OnChargeAbilityUsed(client, Float:charge, Float:deltaCharge);
  *	@param client					The client whose hud is getting updated
  *	@param chargeAbilityState		Ability state of the charge ability, can be all values of the AbilityState enum
  *	@param percent					If charge ability state is Charging then it's the charge percent between 0 and 100, else if it's OnCooldown it's the cooldown percent between 0 and 100
+ *	@noreturn
  */
 forward BFF_FormatChargeAbilityMessageRequest(String:message[], maxlength, client, AbilityState:chargeAbilityState, percent);
 
@@ -192,18 +225,18 @@ forward BFF_FormatChargeAbilityMessageRequest(String:message[], maxlength, clien
  */
 stock BFF_GiveItem(client, itemIndex, String:classname[], const String:attributes[], quality=14, level=42, bool:autoSwitch=true)
 {
-	new Handle:weapon = TF2Items_CreateItem(OVERRIDE_ALL|FORCE_GENERATION);
-	TF2Items_SetClassname(weapon, classname);
-	TF2Items_SetItemIndex(weapon, itemIndex);
-	TF2Items_SetQuality(weapon, quality);
-	TF2Items_SetLevel(weapon, level);
+	new Handle:item = TF2Items_CreateItem(OVERRIDE_ALL|FORCE_GENERATION);
+	TF2Items_SetClassname(item, classname);
+	TF2Items_SetItemIndex(item, itemIndex);
+	TF2Items_SetQuality(item, quality);
+	TF2Items_SetLevel(item, level);
 
 	new String:attributesParts[32][16];
 	new attributeCount = ExplodeString(attributes, ";", attributesParts, sizeof(attributesParts), sizeof(attributesParts[]));
 	attributeCount -= (attributeCount % 2);
 	attributeCount /= 2;
 
-	TF2Items_SetNumAttributes(weapon, attributeCount);
+	TF2Items_SetNumAttributes(item, attributeCount);
 	for (new i = 0; i < attributeCount; i++)
 	{
 		new attributeIndex = StringToInt(attributesParts[i * 2]);
@@ -211,19 +244,25 @@ stock BFF_GiveItem(client, itemIndex, String:classname[], const String:attribute
 		{
 			return ThrowError("Invalid attribute index (%s)", attributesParts[i * 2]);
 		}
-		TF2Items_SetAttribute(weapon, i, attributeIndex, StringToFloat(attributesParts[i * 2 + 1]));
+		TF2Items_SetAttribute(item, i, attributeIndex, StringToFloat(attributesParts[i * 2 + 1]));
 	}
 
-	new weaponEntity = TF2Items_GiveNamedItem(client, weapon);
-	EquipPlayerWeapon(client, weaponEntity);
-	CloseHandle(weapon);
-
-	if (autoSwitch)
+	new itemEntity = TF2Items_GiveNamedItem(client, item);
+	if (TF2_IsWearable(itemEntity))
 	{
-		SetEntPropEnt(client, Prop_Send, "m_hActiveWeapon", weaponEntity);
+		TF2_EquipWearable(client, itemEntity);
 	}
+	else
+	{
+		EquipPlayerWeapon(client, itemEntity);
+		if (autoSwitch)
+		{
+			SetEntPropEnt(client, Prop_Send, "m_hActiveWeapon", itemEntity);
+		}
+	}
+	CloseHandle(item);
 
-	return weaponEntity;
+	return itemEntity;
 }
 
 /**
@@ -321,6 +360,7 @@ stock TF2_RemoveWearable(client, wearable)
 
 stock TF2_EquipWearable(client, wearable) 
 {
+	static Handle:hEquipWearable;
 	if(hEquipWearable == INVALID_HANDLE) 
 	{
 		new Handle:hGameConfigtemp = LoadGameConfigFile("equipwearable"); 
@@ -343,8 +383,9 @@ stock TF2_EquipWearable(client, wearable)
 	SDKCall(hEquipWearable, client, wearable); 
 }
 
-stock TF2_IsWearable(wearable) 
+stock bool:TF2_IsWearable(wearable) 
 { 
+	static Handle:hIsWearable;
 	if(hIsWearable == INVALID_HANDLE) 
 	{ 
 		new Handle:hGameConfigtemp = LoadGameConfigFile("equipwearable"); 
@@ -364,7 +405,7 @@ stock TF2_IsWearable(wearable)
 		} 
 	} 
 
-	return SDKCall(hIsWearable, wearable); 
+	return bool:SDKCall(hIsWearable, wearable); 
 } 
 
 /**
@@ -403,3 +444,26 @@ stock TF2_RemoveAllWeapons2(client)
 		TF2_RemoveWeaponSlot2(client, i);
 	}
 }
+
+
+// No touchy
+public SharedPlugin:__pl_bossfightfortress = 
+{
+    name = "bossfightfortress",
+    file = "bossfightfortress.smx",
+#if defined REQUIRE_PLUGIN
+    required = 1,
+#else
+    required = 0,
+#endif
+};
+
+
+#if !defined REQUIRE_PLUGIN
+public __pl_bossfightfortress_SetNTVOptional()
+{
+	MarkNativeAsOptional("BFF_UpdateHud");
+	MarkNativeAsOptional("BFF_ResetTauntAbilityCooldown");
+	MarkNativeAsOptional("BFF_ResetChargeAbilityCooldown");
+}
+#endif
