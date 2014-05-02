@@ -1397,13 +1397,15 @@ stock GetTeamPlayerCount(TFTeam:team)
 
 public Native_BFF_UpdateHud(Handle:plugin, numParams)
 {
-
+	// todo: implement
 }
+
 public Native_BFF_ResetTauntAbilityCooldown(Handle:plugin, numParams)
 {
-
+	// todo: implement
 }
+
 public Native_BFF_ResetChargeAbilityCooldown(Handle:plugin, numParams)
 {
-
+	// todo: implement
 }
