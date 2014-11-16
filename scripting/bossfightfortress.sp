@@ -34,7 +34,8 @@ enum CooldownMethod
 	CooldownMethod_Mixed	= CooldownMethod_Timed|CooldownMethod_Damage
 }
 
-// Accuracy of the charge information for the hud
+// Accuracy of the charge information for the hud, please keep it to the following numbers:
+// 1, 2, 5, 10, 20, 50
 #define HUD_PERCENTAGE_ACCURACY 5
 #define HUD_PERCENTAGE_ACCURACY_FLOAT (HUD_PERCENTAGE_ACCURACY/100.0)
 
@@ -104,8 +105,8 @@ new g_iCurrentBoss;
 public APLRes:AskPluginLoad2(Handle:myself, bool:late, String:error[], err_max)
 {
 	CreateNative("BFF_UpdateHud", Native_BFF_UpdateHud);
-	CreateNative("BFF_ResetTauntAbilityCooldown", Native_BFF_ResetTauntAbilityCooldown);
-	CreateNative("BFF_ResetChargeAbilityCooldown", Native_BFF_ResetChargeAbilityCooldown);
+	CreateNative("BFF_SetTauntAbilityCooldown", Native_BFF_SetTauntAbilityCooldown);
+	CreateNative("BFF_SetChargeAbilityCooldown", Native_BFF_SetChargeAbilityCooldown);
 
 	RegPluginLibrary("bossfightfortress");
 	return APLRes_Success;
@@ -510,28 +511,7 @@ public Action:Command_Taunt(client, const String:command[], argc)
 
 		if (result)
 		{
-			// Get the new ability state
-			new AbilityState:tauntAbilityState = AbilityState_Ready;
-			new CooldownMethod:cooldownMethod = CooldownMethod_None;
-			if (damageCooldown > 0)
-			{
-				cooldownMethod |= CooldownMethod_Damage;
-				g_iBossTauntCooldownDamage[client] = damageCooldown;
-				g_iBossTauntCooldownDamageTaken[client] = 0;
-				tauntAbilityState = AbilityState_OnCooldown;
-			}
-			if (timedCooldown > 0)
-			{
-				cooldownMethod |= CooldownMethod_Timed;
-				g_fBossTauntCooldownTime[client] = timedCooldown;
-				tauntAbilityState = AbilityState_OnCooldown;
-			}
-
-			// Now set the cooldown method and taunt ability state
-			g_eBossTauntCooldownMethod[client] = cooldownMethod;
-			g_eBossTauntAbilityState[client] = tauntAbilityState;
-			g_fBossTauntCooldownActivationTime[client] = GetGameTime();
-
+			SetTauntCooldown(client, damageCooldown, timedCooldown);
 			UpdateHud(client);
 			return Plugin_Handled;
 		}
@@ -624,7 +604,7 @@ public Action:UpdateHudTimer(Handle:timer, any:client)
 public Gamma_OnBehaviourPossessedClient(client, Behaviour:behaviour)
 {
 	// Only do stuff if it's one of our behaviours!
-	if (Gamma_GetBehaviourType(behaviour) == g_hBossBehaviourType)
+	if (Gamma_BehaviourTypeOwnsBehaviour(g_hBossBehaviourType, behaviour))//(Gamma_GetBehaviourType(behaviour) == g_hBossBehaviourType)
 	{
 		// Take the boss away from the client, just incase he already has one
 		if (g_hClientBossBehaviour[client] != INVALID_BEHAVIOUR)
@@ -643,7 +623,12 @@ public Gamma_OnBehaviourPossessedClient(client, Behaviour:behaviour)
 		RetrieveTauntAbility(client, behaviour);
 
 		// Setup our hooks
-		SDKHook(client, SDKHook_PostThink, Internal_PostThink);
+		if (g_eBossChargeAbilityState[client] != AbilityState_None ||
+			g_eBossTauntAbilityState[client] != AbilityState_None)
+		{
+			// Also, no need to hook PostThink if the boss doesn't make use of it
+			SDKHook(client, SDKHook_PostThink, Internal_PostThink);
+		}
 		SDKHook(client, SDKHook_GetMaxHealth, Internal_GetMaxHealth);
 		SDKHook(client, SDKHook_OnTakeDamage, Internal_OnTakeDamage);
 		g_iTakeHealthHookIds[client] = DHookEntity(g_hTakeHealthHook, false, client);
@@ -742,25 +727,7 @@ stock RetrieveTauntAbility(client, Behaviour:behaviour)
 			Call_PushFloatRef(timedCooldown);
 			Call_Finish();
 
-			// First, we need to get see if either or both of damage and timed cooldowns are set
-			new AbilityState:tauntAbilityState = AbilityState_Ready;
-			new CooldownMethod:cooldownMethod = CooldownMethod_None;
-			if (damageCooldown > 0)
-			{
-				cooldownMethod |= CooldownMethod_Damage;
-				g_iBossTauntCooldownDamage[client] = damageCooldown;
-				tauntAbilityState = AbilityState_OnCooldown;
-			}
-			if (timedCooldown > 0)
-			{
-				cooldownMethod |= CooldownMethod_Timed;
-				g_fBossTauntCooldownTime[client] = timedCooldown;
-				tauntAbilityState = AbilityState_OnCooldown;
-			}
-
-			// Now set the cooldown method and taunt ability state
-			g_eBossTauntCooldownMethod[client] = cooldownMethod;
-			g_eBossTauntAbilityState[client] = tauntAbilityState;
+			SetTauntCooldown(client, damageCooldown, timedCooldown);
 
 			// Don't forget to clear the forward!
 			Gamma_RemoveBehaviourFunctionFromForward(behaviour, "BFF_GetInitialTauntAbilityCooldownRequest", getInitialTauntAbilityCooldownRequestForward);
@@ -789,7 +756,7 @@ stock RetrieveTauntAbility(client, Behaviour:behaviour)
 public Gamma_OnBehaviourReleasedClient(client, Behaviour:behaviour, BehaviourReleaseReason:reason)
 {
 	// Only do stuff if it's one of our behaviours!
-	if (Gamma_GetBehaviourType(behaviour) == g_hBossBehaviourType)
+	if (Gamma_BehaviourTypeOwnsBehaviour(g_hBossBehaviourType, behaviour))//if (Gamma_GetBehaviourType(behaviour) == g_hBossBehaviourType)
 	{
 		// Remove our hooks, clear our forwards and stop our timers
 		DHookRemoveHookID(g_iTakeHealthHookIds[client]);
@@ -961,10 +928,18 @@ stock HandleChargeAbility(client, lastButtons, buttons)
 
 			lastChargePercent[client] = cChargePercent;
 		}
+		else if (chargeDifference < 0)
+		{
+			lastChargePercent[client] = 0;
+		}
 
 		// There's no need for us to get the client buttons when we're on cooldown (with ChargeMode_Normal)
 		if (g_eBossChargeAbilityMode[client] == ChargeMode_Normal)
 		{
+			if (!releasedInAttack2SinceChargeStart[client])
+			{
+				releasedInAttack2SinceChargeStart[client] = ((buttons & IN_ATTACK2) != IN_ATTACK2);
+			}
 			return;
 		}
 	}
@@ -1270,6 +1245,41 @@ stock UpdateHud(client)
 	TriggerTimer(g_hBossHudUpdateTimer[client], true);
 }
 
+// Sets boss taunt cooldown
+stock SetTauntCooldown(client, damageCooldown, Float:timedCooldown)
+{
+	// Get the new ability state
+	new AbilityState:tauntAbilityState = AbilityState_Ready;
+	new CooldownMethod:cooldownMethod = CooldownMethod_None;
+	if (damageCooldown < 0)
+	{
+		damageCooldown = g_iBossTauntCooldownDamage[client];
+	}
+	if (damageCooldown > 0)
+	{
+		cooldownMethod |= CooldownMethod_Damage;
+		g_iBossTauntCooldownDamage[client] = damageCooldown;
+		g_iBossTauntCooldownDamageTaken[client] = 0;
+		tauntAbilityState = AbilityState_OnCooldown;
+	}
+
+	if (timedCooldown < 0.0)
+	{
+		timedCooldown = g_fBossTauntCooldownTime[client];
+	}
+	if (timedCooldown > 0.0)
+	{
+		cooldownMethod |= CooldownMethod_Timed;
+		g_fBossTauntCooldownTime[client] = timedCooldown;
+		tauntAbilityState = AbilityState_OnCooldown;
+	}
+
+	// Now set the cooldown method and taunt ability state
+	g_eBossTauntCooldownMethod[client] = cooldownMethod;
+	g_eBossTauntAbilityState[client] = tauntAbilityState;
+	g_fBossTauntCooldownActivationTime[client] = GetGameTime();
+}
+
 // Adjusts a percentage from 0..1 to 0..100 with the accuracy defined at the top of the file
 stock AdjustFloatPercent(Float:percent, bool:toCeil = false)
 {
@@ -1397,15 +1407,74 @@ stock GetTeamPlayerCount(TFTeam:team)
 
 public Native_BFF_UpdateHud(Handle:plugin, numParams)
 {
-	// todo: implement
+	new client = GetNativeCell(1);
+
+	if (client <= 0 || client > MaxClients)
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Invalid client index (%d)", client);
+	}
+	if (!IsClientInGame(client))
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Client not in game (%d)", client);
+	}
+
+	if (!Gamma_IsPlayerPossessedByPlugin(client, plugin))
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Client is not possessed by plugin (%x)", plugin);
+	}
+
+	UpdateHud(client);
+	return 1;
 }
 
-public Native_BFF_ResetTauntAbilityCooldown(Handle:plugin, numParams)
+public Native_BFF_SetTauntAbilityCooldown(Handle:plugin, numParams)
 {
-	// todo: implement
+	new client = GetNativeCell(1);
+	new damageCooldown = GetNativeCell(2);
+	new Float:timedCooldown = Float:GetNativeCell(3);
+
+	if (client <= 0 || client > MaxClients)
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Invalid client index (%d)", client);
+	}
+	if (!IsClientInGame(client))
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Client not in game (%d)", client);
+	}
+
+	if (!Gamma_IsPlayerPossessedByPlugin(client, plugin))
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Client is not possessed by plugin (%x)", plugin);
+	}
+
+	SetTauntCooldown(client, damageCooldown, timedCooldown);
+	UpdateHud(client);
+	return 1;
 }
 
-public Native_BFF_ResetChargeAbilityCooldown(Handle:plugin, numParams)
+public Native_BFF_SetChargeAbilityCooldown(Handle:plugin, numParams)
 {
-	// todo: implement
+	new client = GetNativeCell(1);
+	new Float:cooldownTime = Float:GetNativeCell(2);
+
+	if (client <= 0 || client > MaxClients)
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Invalid client index (%d)", client);
+	}
+	if (!IsClientInGame(client))
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Client not in game (%d)", client);
+	}
+
+	if (!Gamma_IsPlayerPossessedByPlugin(client, plugin))
+	{
+		return ThrowNativeError(SP_ERROR_NATIVE, "Client is not possessed by plugin (%x)", plugin);
+	}
+
+	g_fChargePercentAtActivation[client] = 0.0;
+	g_fBossChargeCooldownTime[client] = cooldownTime;
+	g_eBossChargeAbilityState[client] = AbilityState_OnCooldown;
+	g_fBossChargeCooldownActivationTime[client] = GetGameTime();
+	UpdateHud(client);
+	return 1;
 }

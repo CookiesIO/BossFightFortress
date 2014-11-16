@@ -89,14 +89,17 @@ forward BFF_FormatBossNameMessageRequest(String:message[], maxlength, client);
  *******************************************************************************/
 
 /**
+ *	Starts cooldown for the clients taunt ability, or resets it with the new time and/or damage
+ *	Set damage and time to 0 to end cooldown, or negative values to use last non-zero values
  *	Damage and timed cooldown can be mixed, they speed up each other, it is NOT whichever comes first!
  *
+ *	@param client			Client to set the cooldown on
  *	@param damageCooldown	Optional: The amount of damage required to 100% charge the taunt ability if higher than 0, not inclusive
  *	@param timedCooldown	Optional: The amount of time in seconds to 100% charge the taunt ability if higher than 0, not inclusive
  *	@noreturn
  *	@error					Taunt ability not implemented, invalid client or boss not active on client
  */
-native BFF_ResetTauntAbilityCooldown(client, damageCooldown=-1, Float:timedCooldown=-1.0);
+native BFF_SetTauntAbilityCooldown(client, damageCooldown=-1, Float:timedCooldown=-1.0);
 
 /**
  *	This is optional
@@ -151,7 +154,7 @@ forward BFF_FormatTauntAbilityMessageRequest(String:message[], maxlength, client
  *	@noreturn
  *	@error					Charge ability not implemented, invalid client or boss not active on client
  */
-native BFF_ResetChargeAbilityCooldown(client, Float:cooldownTime);
+native BFF_SetChargeAbilityCooldown(client, Float:cooldownTime);
 
 /**
  *	This is optional, called when BossFightFortress wants to get the charge mode
@@ -254,10 +257,11 @@ stock BFF_GiveItem(client, itemIndex, String:classname[], const String:attribute
 	}
 	else
 	{
+		new currentlyEquipped = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 		EquipPlayerWeapon(client, itemEntity);
-		if (autoSwitch)
+		if (!autoSwitch && currentlyEquipped != -1)
 		{
-			SetEntPropEnt(client, Prop_Send, "m_hActiveWeapon", itemEntity);
+			SetEntPropEnt(client, Prop_Send, "m_hActiveWeapon", currentlyEquipped);
 		}
 	}
 	CloseHandle(item);
@@ -463,7 +467,7 @@ public SharedPlugin:__pl_bossfightfortress =
 public __pl_bossfightfortress_SetNTVOptional()
 {
 	MarkNativeAsOptional("BFF_UpdateHud");
-	MarkNativeAsOptional("BFF_ResetTauntAbilityCooldown");
-	MarkNativeAsOptional("BFF_ResetChargeAbilityCooldown");
+	MarkNativeAsOptional("BFF_SetTauntAbilityCooldown");
+	MarkNativeAsOptional("BFF_SetChargeAbilityCooldown");
 }
 #endif

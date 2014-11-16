@@ -14,6 +14,7 @@
 
 
 #include <sourcemod>
+#include <sdkhooks>
 #include <gamma>
 #include <bossfightfortress>
 #include <navmesh>
@@ -26,7 +27,7 @@ new Behaviour:g_hSorcererBoss = INVALID_BEHAVIOUR;
 
 // Is the sorcerer a necromancer?
 new bool:g_bIsNecromancer[MAXPLAYERS+1];
-new g_iRevolverEntity[MAXPLAYERS+1];
+new g_iRevolverEntity[MAXPLAYERS+1] = { -1, ... };
 
 // Booleans to store if our bosses are using the continuous ability
 new bool:g_bUsingFasterThanLight[MAXPLAYERS+1];
@@ -34,6 +35,9 @@ new bool:g_bUsingFasterThanLight[MAXPLAYERS+1];
 // Timer handle for skeleton and monoculus spawning
 new Handle:g_hSkeletonSpawnTimers[MAXPLAYERS+1];
 new Handle:g_hMonoculusSpawnTimers[MAXPLAYERS+1];
+
+// Keep track of the amount of possessed players
+new possessedCount = 0;
 
 public Gamma_OnGameModeCreated(GameMode:gameMode)
 {
@@ -48,13 +52,61 @@ public Gamma_OnBehaviourPossessingClient(client)
 {
 	BFF_SetPlayerClass(client, TFClass_Spy);
 	g_bIsNecromancer[client] = (NavMesh_Exists() && (GetRandomInt(0, 10) < 9));
+
+	SDKHook(client, SDKHook_WeaponSwitchPost, Hook_WeaponSwitchPost);
+
+	if (possessedCount == 0)
+	{
+		HookEvent("player_death", Event_PlayerDeath);
+	}
+	possessedCount++;
 }
 
 public Gamma_OnBehaviourReleasingClient(client, BehaviourReleaseReason:reason)
 {
+	g_iRevolverEntity[client] = -1;
 	if (g_bUsingFasterThanLight[client])
 	{
 		g_bUsingFasterThanLight[client] = false;
+	}
+
+	SDKUnhook(client, SDKHook_PreThink, Hook_PreThink);
+	SDKUnhook(client, SDKHook_WeaponSwitchPost, Hook_WeaponSwitchPost);
+
+	possessedCount--;
+	if (possessedCount == 0)
+	{
+		UnhookEvent("player_death", Event_PlayerDeath);
+	}
+}
+
+public Hook_WeaponSwitchPost(client, weapon)
+{
+	PrintToServer("Weapons switch");
+	if (weapon == g_iRevolverEntity[client])
+	{
+		SDKHook(client, SDKHook_PreThink, Hook_PreThink);
+	}
+	else
+	{
+		SDKUnhook(client, SDKHook_PreThink, Hook_PreThink);
+	}
+}
+
+public Hook_PreThink(client)
+{
+	new buttons = GetClientButtons(client);
+	if ((buttons & IN_ATTACK) == IN_ATTACK)
+	{
+		if (GetEntPropFloat(g_iRevolverEntity[client], Prop_Send, "m_flNextPrimaryAttack") <= GetGameTime())
+		{
+			FireFireball(client);
+			SetEntPropFloat(g_iRevolverEntity[client], Prop_Send, "m_flNextPrimaryAttack", GetGameTime() + 1.2);
+		}
+	}
+	if ((buttons & IN_RELOAD) == IN_RELOAD)
+	{
+		
 	}
 }
 
@@ -66,8 +118,8 @@ public BFF_GetMaxHealthRequest(Float:multiplier)
 public BFF_OnEquipBoss(client)
 {
 	TF2_RemoveAllWeapons2(client);
-	BFF_GiveItem(client, 61, "tf_weapon_revolver", "1 : 0");
 	BFF_GiveItem(client, 574, "tf_weapon_knife", "156 ; 1");
+	g_iRevolverEntity[client] = BFF_GiveItem(client, 61, "tf_weapon_revolver", "1 : 0", _, _, false);
 }
 
 public BFF_GetInitialTauntAbilityCooldownRequest(&damageCooldown, &Float:timedCooldown)
@@ -242,10 +294,10 @@ stock FireTeslaBolt(client)
 {
 	new teslaBolt = CreateEntityByName("tf_projectile_lightningorb");
 
-	SetEntPropEnt(teslaBolt, Prop_Data, "m_hThrower", client);
+	SetEntPropEnt(teslaBolt, Prop_Send, "m_hLauncher", client);
 	SetEntPropEnt(teslaBolt, Prop_Data, "m_hOwnerEntity", client);
 
-	MoveInFrontOfHead(teslaBolt, client);
+	ShootFromClient(teslaBolt, client, 800.0);
 	DispatchSpawn(teslaBolt);
 }
 
@@ -253,10 +305,10 @@ stock FireFireball(client)
 {
 	new fireball = CreateEntityByName("tf_projectile_spellfireball");
 
-	SetEntPropEnt(fireball, Prop_Data, "m_hThrower", client);
+	SetEntPropEnt(fireball, Prop_Send, "m_hLauncher", client);
 	SetEntPropEnt(fireball, Prop_Data, "m_hOwnerEntity", client);
 
-	MoveInFrontOfHead(fireball, client);
+	ShootFromClient(fireball, client, 800.0);
 	DispatchSpawn(fireball);
 }
 
@@ -264,29 +316,33 @@ stock FireTransposeTeleport(client)
 {
 	new transposeTeleport = CreateEntityByName("tf_projectile_spelltransposeteleport");
 
-	SetEntPropEnt(transposeTeleport, Prop_Data, "m_hThrower", client);
+	SetEntPropEnt(transposeTeleport, Prop_Send, "m_hThrower", client);
 	SetEntPropEnt(transposeTeleport, Prop_Data, "m_hOwnerEntity", client);
 
-	MoveInFrontOfHead(transposeTeleport, client);
+	ShootFromClient(transposeTeleport, client, 2000.0);
 	DispatchSpawn(transposeTeleport);
 }
 
-stock MoveInFrontOfHead(entity, client)
+stock ShootFromClient(entity, client, Float:speed)
 {
 	new Float:angles[3];
 	new Float:position[3];
 	new Float:direction[3];
+	new Float:velocity[3];
 
 	GetClientEyePosition(client, position);
 	GetClientEyeAngles(client, angles);
 
 	GetAngleVectors(angles, direction, NULL_VECTOR, NULL_VECTOR);
+	NormalizeVector(direction, velocity);
 	NormalizeVector(direction, direction);
 
 	ScaleVector(direction, 10.0);
 	AddVectors(position, direction, position);
 
-	TeleportEntity(entity, position, angles, NULL_VECTOR);
+	ScaleVector(velocity, speed);
+
+	TeleportEntity(entity, position, angles, velocity);
 }
 
 public ChargeMode:BFF_GetChargeModeRequest()
@@ -336,6 +392,21 @@ public Action:ContinuousAbilityUpdateTimer(Handle:timer, any:client)
 		return Plugin_Continue;
 	}
 	return Plugin_Stop;
+}
+
+public Event_PlayerDeath(Handle:event, const String:name[], bool:dontBroadcast)
+{
+	PrintToServer("KILL, KILL HIIIIIM!");
+	new attacker = GetClientOfUserId(GetEventInt(event, "attacker"));
+
+	if (attacker >= 1 && attacker <= MaxClients)
+	{
+		if (g_bUsingFasterThanLight[attacker])
+		{
+			new Float:time = BFF_OnChargeAbilityUsed(attacker, 0.0, 0.0);
+			BFF_SetChargeAbilityCooldown(attacker, time);
+		}
+	}
 }
 
 public BFF_FormatBossNameMessageRequest(String:message[], maxlength, client)
